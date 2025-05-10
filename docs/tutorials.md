@@ -43,7 +43,7 @@ import cbottle.datasets.merged_dataset as md
 dataset = md.TimeMergedDataset(
     loader.times,
     time_loaders=[loader],
-    transform=lambda t, x: x,
+    transform=lambda t, x: x[0],
     chunk_size=48,
     shuffle=True
 )
@@ -74,6 +74,8 @@ loaders = [
 import numpy as np
 
 def encode_task(t, d):
+    t = t[0]
+    d = d[0]
     # Dummy condition; the actual condition will be inferred from the target during training
     condition = []
     target = []
