@@ -38,7 +38,13 @@ parser.add_argument("--fix", action="store_true")
 args = parser.parse_args()
 
 expected = "SPDX-License-Identifier: Apache-2.0"
-exts = ".sh", ".py"
+exts = (
+    ".sh",
+    ".py",
+    ".yaml",
+    ".yml",
+    ".sh",
+)
 
 files = subprocess.check_output(["git", "ls-files", "."])
 

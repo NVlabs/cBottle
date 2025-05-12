@@ -653,6 +653,7 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         yield_index: bool = False,
         healpixpad_order: bool = True,
         sst: bool = False,
+        land_path: str = config.LAND_DATA_URL_6,
         sst_monmean_path: str = config.SST_MONMEAN_DATA_URL_6,
         cache: bool = False,
     ):
@@ -693,12 +694,14 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
                 time=self.sst_ds.time[-1].values
             ).values
 
-        land_data = zarr.open_group(
-            f"s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_{self.res_level}.zarr",
-            storage_options=dict(
+        if land_path.startswith("s3://"):
+            storage_options = dict(
                 client_kwargs=dict(endpoint_url="https://pbss.s8k.io")
-            ),
-        )
+            )
+        else:
+            storage_options = None
+
+        land_data = zarr.open_group(land_path, storage_options=storage_options)
         self.land_fraction = land_data["land_fraction"][:]
 
         self._mean = torch.tensor(self.mean).unsqueeze(-1)

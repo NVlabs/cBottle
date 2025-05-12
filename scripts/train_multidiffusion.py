@@ -168,10 +168,16 @@ def train(
         )
     else:
         training_dataset = HealpixDatasetV5(
-            path=config.RAW_DATA_URL, train=True, healpixpad_order=False
+            path=config.RAW_DATA_URL,
+            train=True,
+            healpixpad_order=False,
+            land_path=config.LAND_DATA_URL_10,
         )
         test_dataset = HealpixDatasetV5(
-            path=config.RAW_DATA_URL, train=False, healpixpad_order=False
+            path=config.RAW_DATA_URL,
+            train=False,
+            healpixpad_order=False,
+            land_path=config.LAND_DATA_URL_10,
         )
         training_sampler = samplers.InfiniteSequentialSampler(training_dataset)
         test_sampler = samplers.distributed_split(

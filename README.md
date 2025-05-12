@@ -1,9 +1,11 @@
 # Climate in a Bottle
-![](https://private-user-images.githubusercontent.com/1386642/442340656-bbd375ef-47d1-466f-ad19-b5ea11376ef3.jpg?jwt=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NDY4MzM3MjIsIm5iZiI6MTc0NjgzMzQyMiwicGF0aCI6Ii8xMzg2NjQyLzQ0MjM0MDY1Ni1iYmQzNzVlZi00N2QxLTQ2NmYtYWQxOS1iNWVhMTEzNzZlZjMuanBnP1gtQW16LUFsZ29yaXRobT1BV1M0LUhNQUMtU0hBMjU2JlgtQW16LUNyZWRlbnRpYWw9QUtJQVZDT0RZTFNBNTNQUUs0WkElMkYyMDI1MDUwOSUyRnVzLWVhc3QtMSUyRnMzJTJGYXdzNF9yZXF1ZXN0JlgtQW16LURhdGU9MjAyNTA1MDlUMjMzMDIyWiZYLUFtei1FeHBpcmVzPTMwMCZYLUFtei1TaWduYXR1cmU9Yjg5ODk0MjkzYmQzZjRmOWU2ZjdiNWFkYWI5OTAwMjM1YzliYTY5NjNjY2NkYTgxNDJkZDkwNjYxZjUwZWI3ZSZYLUFtei1TaWduZWRIZWFkZXJzPWhvc3QifQ.Puy94EkhszwwH2El4_w707ponMiii6uNi-XZWaZtyYU)
+![](https://github.com/user-attachments/assets/a2cab939-48ce-421a-8008-00b17fd6fa9f)
 
 cBottle is an diffusion model that generates atmospheric states at kilometer resolution using a cascaded diffusion architecture.
 
 This model is for research and development only.
+
+[📚 Documentation](https://nvlabs.github.io/cBottle/)
 
 ## Setup
 

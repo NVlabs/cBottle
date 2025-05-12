@@ -4,6 +4,10 @@ lint:
 	python -m ruff format --check
 	python -m ruff check
 
+format:
+	python3 ci/check_licenses.py --fix
+	python -m ruff format
+
 docs:
 	uvx mkdocs build
 

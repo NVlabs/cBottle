@@ -37,6 +37,14 @@ V6_ICON_ZARR = os.getenv(
 )
 V6_ICON_ZARR_PROFILE = "pbss"
 
+LAND_DATA_URL_10 = os.getenv(
+    "LAND_DATA_URL_10", "s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_10.zarr/"
+)
+
+LAND_DATA_URL_6 = os.getenv(
+    "LAND_DATA_URL_6", "s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_6.zarr/"
+)
+
 SST_MONMEAN_DATA_URL_6 = os.getenv(
     "SST_MONMEAN_DATA_URL_6", "s3://asubramaniam-testing/ngc3028_P1D_ts_monmean_6.zarr"
 )

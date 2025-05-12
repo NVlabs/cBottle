@@ -151,6 +151,8 @@ def dataset_wrapper(*, split: str = ""):
 
 ## Step 4. Start Training with the Custom Dataset
 
+At least 60 GB of GPU memory is required. To train the super-resolution model on Perlmutter, set -C 'gpu&hbm80g' to request A100 80GB nodes.
+
 ```python
 train_super_resolution(
     output_path="training_output",
@@ -161,7 +163,6 @@ train_super_resolution(
 ```
 
 # Performing super-resolution on a sub-region
-
 ```bash
 python scripts/inference_multidiffusion.py cBottle-SR.zip inference_output --overlap-size 32 --super-resolution-box 0 -120 50 -40
 ```
