@@ -5,7 +5,7 @@ cBottle is an diffusion model that generates atmospheric states at kilometer res
 
 This model is for research and development only.
 
-[📚 Documentation](https://nvlabs.github.io/cBottle/) [📦 Checkpoints](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/earth-2/models/cbottle)
+[📖 arXiv](https://arxiv.org/abs/2505.06474v1) [📦 Checkpoints](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/earth-2/models/cbottle) [📚 Documentation](https://nvlabs.github.io/cBottle/) 
 
 ## Setup
 
