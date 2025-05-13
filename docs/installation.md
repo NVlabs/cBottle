@@ -22,5 +22,5 @@ pip install -e .
 module load pytorch/2.6.0
 python3 -m venv --system-site-packages cbottle-env
 source cbottle-env/bin/activate
-CC=gcc CXX=g++ pip install --no-build-isolation https://github.com/NVlabs/earth2grid/archive/c51739da94596c5520d8963644daa3d20d224154.tar.gz
+CC=gcc CXX=g++ pip install --no-build-isolation https://github.com/NVlabs/earth2grid/archive/main.tar.gz
 ```
