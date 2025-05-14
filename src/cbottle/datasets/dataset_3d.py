@@ -660,6 +660,7 @@ def get_amip_dataset(
     time_step: int = 1,
     time_length: int = 1,
     frame_masker: Optional[Callable] = None,
+    map_style: bool = False,
 ):
     if not sst_input:
         raise ValueError("AMIP inference only works with SST input.")
@@ -703,7 +704,7 @@ def get_amip_dataset(
         chunk_size=chunk_size,
         frame_step=frame_step,
         time_length=time_length,
-        map_style=time_length > 1,
+        map_style=map_style,
     )
 
 
