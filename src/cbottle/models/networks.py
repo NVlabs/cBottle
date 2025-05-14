@@ -702,7 +702,7 @@ class SongUNet(torch.nn.Module):
         }[mixing_type]
         self.input_shape = (in_channels, time_length, domain.numel())
         self.label_dropout = label_dropout
-
+        self.grid = domain._grid
         emb_channels = model_channels * channel_mult_emb
         noise_channels = model_channels * channel_mult_noise
         init = dict(init_mode="xavier_uniform")
@@ -984,7 +984,7 @@ class SongUNet(torch.nn.Module):
     def init_pos_embed_sinusoid(self):
         with torch.no_grad():
             num_freq = self.pos_embed_channels // 4
-            grid = Grid(10, pixel_order=PixelOrder.NEST)
+            grid = self.grid
             lat = grid.lat
             lon = grid.lon
             lon = np.deg2rad(lon)
@@ -1233,11 +1233,11 @@ def SongUNetHPX256(in_channels: int, out_channels: int, **kwargs) -> SongUNet:
 
 
 def SongUNetHPX1024(
-    in_channels: int, out_channels: int, img_resolution: int, **kwargs
+    in_channels: int, out_channels: int, img_resolution: int, level: int, **kwargs
 ) -> SongUNet:
     """Unet for patched HPX1024 resolution"""
     domain = PatchedHealpixDomain(
-        Grid(level=10, pixel_order=HEALPIX_PAD_XY), patch_size=img_resolution
+        Grid(level=level, pixel_order=PixelOrder.NEST), patch_size=img_resolution
     )
     config = {
         "add_spatial_embedding": True,

@@ -12,28 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import dataclasses
-import json
+set -e
+apt-get install -y libnetcdf-dev libeccodes-dev
 
+cd /tmp
 
-@dataclasses.dataclass
-class ModelConfigV1:
-    architecture: str = "unet_hpx64"
-    model_channels: int = 128
-    label_dim: int = 0
-    out_channels: int = 1
-    condition_channels: int = 0
-    time_length: int = 1
-    label_dropout: float = 0.0
-    level: int = 6
+[[ -d cdo-2.4.4 ]] || curl -L https://code.mpimet.mpg.de/attachments/download/29649/cdo-2.4.4.tar.gz | tar xz
+cd cdo-2.4.4
+./configure --prefix /usr/local --with-netcdf=yes --with-eccodes=yes
+make clean
+make -j 8 
+make install
 
-    # arguments for SongUnetHPX1024
-    position_embed_channels: int = 20
-    img_resolution: int = 128
-
-    def dumps(self):
-        return json.dumps(dataclasses.asdict(self))
-
-    @classmethod
-    def loads(cls, s):
-        return cls(**json.loads(s))
+# clean up
+cd /tmp
+rm -r cdo-2.4.4

@@ -16,6 +16,7 @@ dependencies = [
     "earth2grid>=2025.4.1",
     "h5netcdf>=1.6.1",
     "matplotlib>=3",
+    "netCDF4>=1.7.0",
     "numpy>=1.25.0",
     "pandas>=2.2.3",
     "psutil>=6.0.0",

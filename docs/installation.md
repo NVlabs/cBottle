@@ -16,11 +16,19 @@ Now, install cbottle
 pip install -e .
 ```
 
-## NERSC
+## NERSC (instructions)
 
+Install the pre-requisites
 ```
 module load pytorch/2.6.0
 python3 -m venv --system-site-packages cbottle-env
 source cbottle-env/bin/activate
 CC=gcc CXX=g++ pip install --no-build-isolation https://github.com/NVlabs/earth2grid/archive/main.tar.gz
+```
+
+Then clone cBottle and install some other dependencies
+```
+git clone https://github.com/NVlabs/cBottle
+cd cBottle
+pip install -e .
 ```

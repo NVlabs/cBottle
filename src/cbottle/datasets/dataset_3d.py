@@ -226,26 +226,22 @@ def combine_and_mask_frames(
     return frame_masker(out)
 
 
-def get_transform(
-    encode_frame: Callable,
-    frame_masker: Optional[FrameMasker] = None,
-) -> Callable:
-    """
-    Encodes frames, and in the video case combines/masks them along the time dimension.
-    """
+def _transform(
+    times: list[cftime.DatetimeGregorian],
+    data_list: list[dict],
+    *,
+    encode_frame,
+    frame_masker,
+) -> dict:
+    frames = [encode_frame(time=t, data=d) for t, d in zip(times, data_list)]
 
-    def transform(times: list[cftime.DatetimeGregorian], data_list: list[dict]) -> dict:
-        frames = [encode_frame(time=t, data=d) for t, d in zip(times, data_list)]
+    if len(frames) == 1:
+        return frames[0]
 
-        if len(frames) == 1:
-            return frames[0]
+    if frame_masker is None:
+        raise ValueError("Frame masker must be provided in video mode")
 
-        if frame_masker is None:
-            raise ValueError("Frame masker must be provided in video mode")
-
-        return combine_and_mask_frames(frames, frame_masker)
-
-    return transform
+    return combine_and_mask_frames(frames, frame_masker)
 
 
 def encode_task(
@@ -453,7 +449,8 @@ def _get_dataset_icon(
         is_land=land_fraction > 0,
     )
 
-    transform = get_transform(
+    transform = functools.partial(
+        _transform,
         encode_frame=encode_frame,
         frame_masker=frame_masker,
     )
@@ -532,7 +529,7 @@ def _get_dataset_era5(
 ):
     target_data_loader = ZarrLoader(
         path=config.V6_ERA5_ZARR,
-        storage_options=get_storage_options("pdx"),
+        storage_options=config.V6_ERA5_ZARR_PROFILE,
         variables_3d=["u", "v", "t", "z"],
         variables_2d=[
             "sstk",
@@ -557,7 +554,10 @@ def _get_dataset_era5(
             HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
         )
         loaders.append(
-            AmipSSTDataset(grid, storage_options=get_storage_options("pbss"))
+            AmipSSTDataset(
+                grid,
+                storage_options=get_storage_options(config.AMIP_MID_MONTH_SST_PROFILE),
+            )
         )
 
     metadata = DATASET_METADATA["era5"]
@@ -576,7 +576,8 @@ def _get_dataset_era5(
         encode_task, label, get_mean(), get_std(), sst_input=sst_input
     )
 
-    transform = get_transform(
+    transform = functools.partial(
+        _transform,
         encode_frame=encode_frame,
         frame_masker=frame_masker,
     )
@@ -679,12 +680,17 @@ def get_amip_dataset(
     grid = earth2grid.healpix.Grid(
         HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
     )
-    loaders = [AmipSSTDataset(grid, storage_options=get_storage_options("pbss"))]
+    loaders = [
+        AmipSSTDataset(
+            grid, storage_options=get_storage_options(config.AMIP_MID_MONTH_SST_PROFILE)
+        )
+    ]
     encode_frame = functools.partial(
         _encode_amip, label=LABELS.index("era5"), mask=mask
     )
 
-    transform = get_transform(
+    transform = functools.partial(
+        _transform,
         encode_frame=encode_frame,
         frame_masker=frame_masker,
     )

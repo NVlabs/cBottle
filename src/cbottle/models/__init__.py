@@ -49,6 +49,7 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
             model_channels=config.model_channels,
             pos_embed_channels=config.position_embed_channels,
             label_dim=config.label_dim,
+            level=config.level,
         )
     else:
         raise NotImplementedError(config.architecture)

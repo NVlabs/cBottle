@@ -1,0 +1,22 @@
+# Paths to ICON data
+RAW_DATA_URL=/global/cfs/cdirs/trn006/data/nvidia/ngc3028_PT30M_4weeks_10.zarr/
+RAW_DATA_PROFILE=""
+
+V6_ICON_ZARR=/global/cfs/cdirs/trn006/data/nvidia/ICON_v6_dataset.zarr/
+V6_ICON_ZARR_PROFILE=""
+
+SST_MONMEAN_DATA_URL_6=/global/cfs/cdirs/trn006/data/nvidia/ngc3028_P1D_ts_monmean_6.zarr
+SST_MONMEAN_DATA_PROFILE=""
+
+# paths to era5 data
+V6_ERA5_ZARR=/global/cfs/cdirs/trn006/data/nvidia/era5_hpx_6.zarr/
+V6_ERA5_ZARR_PROFILE=""
+
+AMIP_MID_MONTH_SST=/global/cfs/cdirs/trn006/data/nvidia/input4MIPs/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc
+AMIP_MID_MONTH_SST_PROFILE=""
+
+
+LAND_DATA_URL_10=/global/cfs/cdirs/trn006/data/nvidia/landfraction/ngc3028_P1D_10.zarr/
+LAND_DATA_URL_6=/global/cfs/cdirs/trn006/data/nvidia/landfraction/ngc3028_P1D_6.zarr/
+LAND_DATA_URL_4=s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_4.zarr/
+LAND_DATA_PROFILE=""
