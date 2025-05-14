@@ -12,10 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# python3 scripts/xarray_server.py --sigma-max 200 --bf16  --state-path /scratch/icon_hpx_hack/ngc-versions/v1/cBottle-3d.zip  --start-time 2000-01-01 --end-time 2001-12-31  --batch-size 4 --freq 3h
+state=/global/cfs/cdirs/trn006/data/nvidia/cBottle/cBottle-3d.zip
 
-docker run  --rm --name nginx --net host \
--ti \
--v $PWD/nginx.conf:/etc/nginx/nginx.conf \
--v nginx_cache:/tmp/cache nginx
+python3 scripts/xarray_server.py \
+    --sigma-max 200 --bf16  \
+    --state-path "$state" \
+    --start-time 2000-01-01 \
+    --end-time 2001-12-31  \
+    --batch-size 4 \
+    --freq 3h
+
+# docker run  --rm --name nginx --net host \
+# -ti \
+# -v $PWD/nginx.conf:/etc/nginx/nginx.conf \
+# -v nginx_cache:/tmp/cache nginx
 
