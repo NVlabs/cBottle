@@ -14,13 +14,16 @@
 # limitations under the License.
 state=/global/cfs/cdirs/trn006/data/nvidia/cBottle/cBottle-3d.zip
 
+
 python3 scripts/xarray_server.py \
     --sigma-max 200 --bf16  \
     --state-path "$state" \
     --start-time 2000-01-01 \
     --end-time 2001-12-31  \
     --batch-size 4 \
-    --freq 3h
+    --freq 3h \
+    --port 9091 \
+    --scheduler-file scheduler.json
 
 # docker run  --rm --name nginx --net host \
 # -ti \

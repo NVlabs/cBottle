@@ -175,7 +175,6 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
 
         return window_tensor
 
-
     def _generator_shuffle(self, arr, worker_info=None):
         if self._generator is None:
             if worker_info:
