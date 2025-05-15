@@ -18,6 +18,7 @@ import time
 import earth2grid
 import torch.distributed as dist
 import argparse
+import einops
 import cbottle.models
 from cbottle.datasets import samplers
 from cbottle import healpix_utils
@@ -282,18 +283,18 @@ def train(
     while True:
         for batch in training_loader:
             data = batch["target"].cuda()
-            data = data.view(7*12, -1)
+            data = einops.rearrange(data, "t c x -> (t c) x")
             with torch.no_grad():
                 data = data.cuda(non_blocking=True)
                 target = data
                 # get low res
-                # set lr to zero for middel frames
-                lr = data
+                # set lr to zero for middle frames
+                lr = data.clone()
                 lr[1:-1] = 0
                 for _ in range(training_dataset.grid.level - low_res_grid.level):
                     lr = healpix_utils.average_pool(lr)           
-                global_lr = regrid_to_latlon(lr.double())[None,].cuda()
-                lr = regrid(lr)
+                global_lr = regrid_to_latlon(lr.double())[None,].cuda() # (1, T*C, x, y)
+                lr = regrid(lr) # (T*C, X)
 
             for lpe, ltarget, llr, end_flag in healpix_utils.to_patches(
                 [net.module.model.pos_embed, target, lr],
@@ -303,10 +304,16 @@ def train(
                 step += 1
                 optimizer.zero_grad()
                 with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    llr = llr.view(-1, 12, 128, 128).to(global_lr.device)
-                    ltarget = ltarget.view(-1, 12, 128, 128).to(global_lr.device)
-                    global_lr_repeat = global_lr.view(-1, 12, 128, 128).repeat(train_batch_size, 1, 1, 1)
-                    lpe = lpe.repeat_interleave(time_length, dim=0)
+                    llr = einops.rearrange(llr, "b (t c) x y -> (b t) c x y", t=time_length).to(global_lr.device)
+                    ltarget = einops.rearrange(ltarget, "b (t c) x y -> (b t) c x y", t=time_length).to(global_lr.device)
+                    global_lr_repeat = einops.repeat(
+                        global_lr,
+                        '1 (t c) x y -> (b t) c x y',
+                        b=train_batch_size,
+                        t=time_length,
+                    )
+                    lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=time_length)
+
                     # Compute the loss and its gradients
                     llr = torch.cat((llr, global_lr_repeat), dim=1)
                     loss = loss_fn(net, img_clean=ltarget, img_lr=llr, pos_embed=lpe)
@@ -328,10 +335,11 @@ def train(
                         val_running_loss = 0
                         for batch in test_loader:
                             data = batch["target"].cuda()
-                            data = data.view(7*12, -1)
+                            data = einops.rearrange(data, "t c x -> (t c) x")
                             target = data
                             # get low res
-                            lr = data
+                            lr = data.clone()
+                            lr[1:-1] = 0
                             for _ in range(
                                 training_dataset.grid.level - low_res_grid.level
                             ):
@@ -345,10 +353,16 @@ def train(
                                 patch_size=img_resolution,
                                 batch_size=test_batch_size,
                             ):  
-                                llr = llr.view(-1, 12, 128, 128).to(global_lr.device)
-                                ltarget = ltarget.view(-1, 12, 128, 128).to(global_lr.device)
-                                global_lr_repeat = global_lr.view(-1, 12, 128, 128).repeat(test_batch_size, 1, 1, 1)
-                                lpe = lpe.repeat_interleave(time_length, dim=0)
+                                llr = einops.rearrange(llr, "b (t c) x y -> (b t) c x y", t=time_length).to(global_lr.device)
+                                ltarget = einops.rearrange(ltarget, "b (t c) x y -> (b t) c x y", t=time_length).to(global_lr.device)
+                                global_lr_repeat = einops.repeat(
+                                    global_lr,
+                                    '1 (t c) x y -> (b t) c x y',
+                                    b=train_batch_size,
+                                    t=time_length,
+                                )
+                                lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=time_length)
+
                                 llr = torch.cat(
                                     (llr, global_lr_repeat),
                                     dim=1,
