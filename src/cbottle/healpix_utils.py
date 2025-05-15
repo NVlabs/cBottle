@@ -18,7 +18,7 @@ import earth2grid
 import random
 import torch
 import einops
-
+import time
 
 def hpxpad2ring(x):
     return healpix.reorder(x, healpix.HEALPIX_PAD_XY, healpix.PixelOrder.RING)
@@ -92,6 +92,8 @@ def to_patches(
     padding = padding or patch_size // 2
 
     padded_tensors = [healpix.pad(to_faces(a), padding=padding) for a in nest_tensors]
+    del nest_tensors
+    torch.cuda.empty_cache()
 
     unfold = torch.nn.Unfold(kernel_size=patch_size, stride=stride)
 
@@ -100,16 +102,17 @@ def to_patches(
         f = 1
         x = x.transpose(c, f)
         
-        # to reduce GPU mem usage
         if x.shape[1]>20:
+            # to reduce GPU mem usage, batch and allocate on cpu
+            # However, runs slower (15s overhead) due to gpu->cpu copy in setting uf from calls to unfold
             temp = unfold(x[0:1])
             uf = torch.zeros((12, temp.shape[1], temp.shape[2]))
-            with torch.no_grad():
-                for face in range(12):
-                    uf[face:face+1] = unfold(x[face:face+1])
-                patches = einops.rearrange(
-                    uf, "f (c x y) l -> (f l) c x y", c=x.shape[1], x=patch_size, y=patch_size
-                ).detach()
+            uf[0:1] = temp
+            for face in range(1, 12):
+                uf[face:face+1] = unfold(x[face:face+1])
+            patches = einops.rearrange(
+                uf, "f (c x y) l -> (f l) c x y", c=x.shape[1], x=patch_size, y=patch_size
+            )
         else:
             uf = unfold(x)
             patches = einops.rearrange(
@@ -118,6 +121,9 @@ def to_patches(
         return torch.split(patches, batch_size, dim=0)
 
     patches = [unfold_and_batch(a) for a in padded_tensors]
+
+    del padded_tensors
+    torch.cuda.empty_cache()
     nbatches = len(patches[0])
 
     index = list(range(nbatches))

@@ -157,6 +157,7 @@ def train(
     os.makedirs(output_path, exist_ok=True)
     training_sampler = None
     test_sampler = None
+    time_interval = 2
     # dataloader
     if test_fast:
         training_dataset = Mockdataset()
@@ -174,6 +175,7 @@ def train(
             train=True,
             healpixpad_order=False,
             time_length=time_length,
+            time_interval=time_interval,
             land_path=config.LAND_DATA_URL_10,
         )
         test_dataset = HealpixDatasetV5(
@@ -181,6 +183,7 @@ def train(
             train=False,
             healpixpad_order=False,
             time_length=time_length,
+            time_interval=time_interval,
             land_path=config.LAND_DATA_URL_10,
         )
         training_sampler = samplers.InfiniteSequentialSampler(training_dataset)
@@ -282,30 +285,30 @@ def train(
 
     while True:
         for batch in training_loader:
-            data = batch["target"].cuda()
+            data = batch["target"].cuda(non_blocking=True)
             data = einops.rearrange(data, "t c x -> (t c) x")
-            with torch.no_grad():
-                data = data.cuda(non_blocking=True)
-                target = data
-                # get low res
-                # set lr to zero for middle frames
-                lr = data.clone()
-                lr[1:-1] = 0
-                for _ in range(training_dataset.grid.level - low_res_grid.level):
-                    lr = healpix_utils.average_pool(lr)           
-                global_lr = regrid_to_latlon(lr.double())[None,].cuda() # (1, T*C, x, y)
-                lr = regrid(lr) # (T*C, X)
-
-            for lpe, ltarget, llr, end_flag in healpix_utils.to_patches(
+            target = data
+            # get low res
+            # set lr to zero for middle frames
+            lr = data.clone()
+            lr[1:-1] = 0
+            for _ in range(training_dataset.grid.level - low_res_grid.level):
+                lr = healpix_utils.average_pool(lr)
+            global_lr = regrid_to_latlon(lr.double())[None,].cuda() # (1, T*C, x, y)
+            lr = regrid(lr) # (T*C, X)
+            train_patches = healpix_utils.to_patches(
                 [net.module.model.pos_embed, target, lr],
                 patch_size=img_resolution,
                 batch_size=train_batch_size,
-            ):
+            )
+            del data, target, lr
+ 
+            for lpe, ltarget, llr, end_flag in train_patches:
                 step += 1
                 optimizer.zero_grad()
                 with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    llr = einops.rearrange(llr, "b (t c) x y -> (b t) c x y", t=time_length).to(global_lr.device)
-                    ltarget = einops.rearrange(ltarget, "b (t c) x y -> (b t) c x y", t=time_length).to(global_lr.device)
+                    llr = einops.rearrange(llr.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
+                    ltarget = einops.rearrange(ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
                     global_lr_repeat = einops.repeat(
                         global_lr,
                         '1 (t c) x y -> (b t) c x y',
@@ -334,7 +337,7 @@ def train(
                     with torch.no_grad():
                         val_running_loss = 0
                         for batch in test_loader:
-                            data = batch["target"].cuda()
+                            data = batch["target"].cuda(non_blocking=True)
                             data = einops.rearrange(data, "t c x -> (t c) x")
                             target = data
                             # get low res
@@ -348,17 +351,20 @@ def train(
                             lr = regrid(lr)
                             # validation loss
                             count = 0
-                            for lpe, ltarget, llr, _ in healpix_utils.to_patches(
+                            test_patches = healpix_utils.to_patches(
                                 [net.module.model.pos_embed, target, lr],
                                 patch_size=img_resolution,
                                 batch_size=test_batch_size,
-                            ):  
-                                llr = einops.rearrange(llr, "b (t c) x y -> (b t) c x y", t=time_length).to(global_lr.device)
-                                ltarget = einops.rearrange(ltarget, "b (t c) x y -> (b t) c x y", t=time_length).to(global_lr.device)
+                            )
+                            del data, target, lr
+
+                            for lpe, ltarget, llr, _ in test_patches:  
+                                llr = einops.rearrange(llr.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
+                                ltarget = einops.rearrange(ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
                                 global_lr_repeat = einops.repeat(
                                     global_lr,
                                     '1 (t c) x y -> (b t) c x y',
-                                    b=train_batch_size,
+                                    b=test_batch_size,
                                     t=time_length,
                                 )
                                 lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=time_length)
@@ -396,6 +402,12 @@ def train(
                             gpu_memory_used = torch.cuda.memory_allocated() / (
                                 1024 * 1024 * 1024
                             )  # Convert to GB
+                            peak_gpu_memory_reserved = torch.cuda.max_memory_reserved() / (
+                                1024 * 1024 * 1024
+                            )
+                            peak_gpu_memory_allocated = torch.cuda.max_memory_allocated() / (
+                                1024 * 1024 * 1024
+                            )
                             toc = time.time()
                             if old_pos is not None and old_pos2 is not None:
                                 a = torch.sqrt(torch.sum((pos - old_pos) ** 2))
@@ -425,7 +437,7 @@ def train(
                                     .numpy()
                                 )
                                 print(
-                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, diff pos: {:.2e}, corr pos: {:.2f}, diff conv: {:.2e}, corr conv: {:.2f}, grad norm: {:.2e}, gpu usage: {:.3f}, time: {:6.1f} sec".format(
+                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, diff pos: {:.2e}, corr pos: {:.2f}, diff conv: {:.2e}, corr conv: {:.2f}, grad norm: {:.2e}, gpu usage: {:.3f}, peak gpu reserved: {:.3f}, peak gpu allocated: {:.3f}, time: {:6.1f} sec".format(
                                         step,
                                         train_loss_list[-1],
                                         val_loss_list[-1],
@@ -446,18 +458,22 @@ def train(
                                         corr_conv,
                                         grad_norm,
                                         gpu_memory_used,
+                                        peak_gpu_memory_reserved,
+                                        peak_gpu_memory_allocated,
                                         (toc - tic),
                                     ),
                                     flush=True,
                                 )
                             else:
                                 print(
-                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, grad norm: {:.2e}, gpu usage: {:.3f}, time: {:6.1f} sec".format(
+                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, grad norm: {:.2e}, gpu usage: {:.3f}, peak gpu reserved: {:.3f}, peak gpu allocated: {:.3f}, time: {:6.1f} sec".format(
                                         step,
                                         train_loss_list[-1],
                                         val_loss_list[-1],
                                         grad_norm,
                                         gpu_memory_used,
+                                        peak_gpu_memory_reserved,
+                                        peak_gpu_memory_allocated,
                                         (toc - tic),
                                     ),
                                     flush=True,

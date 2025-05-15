@@ -656,7 +656,8 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         land_path: str = config.LAND_DATA_URL_6,
         sst_monmean_path: str = config.SST_MONMEAN_DATA_URL_6,
         cache: bool = False,
-        time_length: int = 1, 
+        time_length: int = 1,
+        time_interval: int = 1,
     ):
         """
         Args:
@@ -684,7 +685,7 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         self.sst = sst
         self.cache = cache
         self.time_length = time_length
-        self.time_interval = 2 # unit of 30 minutes
+        self.time_interval = time_interval # unit of 30 minutes
 
         if self.sst:
             self.sst_ds = xarray.open_zarr(sst_monmean_path)
@@ -796,7 +797,7 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         return {}
 
     def __len__(self):
-        return len(self.time_index)
+        return len(self.time_index) - (self.time_length-1) * self.time_interval
 
     def randomize_initial_time(self):
         self.initial_time = random.randint(0, self.time_index.size - 1)
