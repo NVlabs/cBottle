@@ -25,7 +25,7 @@ class ModelConfigV1:
     condition_channels: int = 0
     time_length: int = 1
     label_dropout: float = 0.0
-    level: int = 6
+    level: int = 10
 
     # arguments for SongUnetHPX1024
     position_embed_channels: int = 20
