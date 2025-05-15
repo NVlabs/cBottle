@@ -390,6 +390,7 @@ class UNetBlock(torch.nn.Module):
         init_attn=None,
         temporal_attention: bool = False,
         time_length: Optional[int] = None,
+        patched: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -460,12 +461,20 @@ class UNetBlock(torch.nn.Module):
                     "time_length must be specified if temporal_attention is not None"
                 )
             self.time_length = time_length
-            self.temporal_attention = TemporalAttention(
-                out_channels=out_channels,
-                seq_length=time_length,
-                eps=1e-5,
-                num_heads=self.num_heads,
-            )
+            if patched:
+                self.temporal_attention = TemporalAttentionPatched(
+                    out_channels=out_channels,
+                    seq_length=time_length,
+                    eps=1e-5,
+                    num_heads=self.num_heads,
+                )
+            else:
+                self.temporal_attention = TemporalAttention(
+                    out_channels=out_channels,
+                    seq_length=time_length,
+                    eps=1e-5,
+                    num_heads=self.num_heads,
+                )
 
     def forward(self, x, emb):
         # TODO add a flag controlling this
@@ -612,6 +621,50 @@ class TemporalAttention(torch.nn.Module):
         out = einops.rearrange(out, "(b x) h c t -> b (h c) t x", x=x.shape[-1])
         return self.proj(out).to(dtype)
 
+class TemporalAttentionPatched(torch.nn.Module):
+    def __init__(
+        self, *, out_channels: int, seq_length: int, eps, num_heads: int
+    ) -> None:
+        super().__init__()
+        self.norm2 = GroupNorm(num_channels=out_channels, eps=eps)
+        self.qkv = torch.nn.Conv2d(
+            in_channels=out_channels, out_channels=out_channels * 3, kernel_size=1
+        )
+        self.proj = torch.nn.Conv2d(
+            in_channels=out_channels, out_channels=out_channels, kernel_size=1
+        )
+        torch.nn.init.normal_(self.proj.weight.data).mul_(1e-5)
+        self.positional_embedding = torch.nn.Parameter(
+            torch.empty(num_heads, 2 * seq_length)
+        )
+        torch.nn.init.normal_(self.positional_embedding.data).mul_(1e-5)
+        self.num_heads = num_heads
+        self.seq_length = seq_length
+
+    def forward(self, x):
+        dtype = x.dtype
+        x = x.float()
+        x_reshape = einops.rearrange(
+            x, "(b t) c x y -> b c t (x y)", t=self.seq_length
+        )
+        qkv = self.qkv(self.norm2(x_reshape))
+        q, k, v = einops.rearrange(
+            qkv, "b (n heads c) t x -> n (b x) heads t c", n=3, heads=self.num_heads
+        )
+        # q - q time dim
+        # k - k time dim
+        attn = torch.einsum("b h q c, b h k c -> b h q k", q, k / np.sqrt(k.shape[-1]))
+
+        i = torch.arange(self.seq_length)
+        pairwise_distance = i.unsqueeze(1) - i + self.seq_length - 1
+        relative_embedding = self.positional_embedding[:, pairwise_distance]
+
+        w = attn + relative_embedding
+        w = w.softmax(-1)
+        out = torch.einsum("bhqk,bhkc->b h c q", w, v)
+        out = einops.rearrange(out, "(b x y) h c t -> (b t) (h c) x y", x=x.shape[-2], y=x.shape[-1])
+        return self.proj(out).to(dtype)
+    
 
 class SpatialFactory(OriginalFactory):
     def __init__(self, img_size: tuple[int, int]):
@@ -720,6 +773,7 @@ class SongUNet(torch.nn.Module):
             init=init,
             init_zero=init_zero,
             init_attn=init_attn,
+            patched=patched,
         )
         if channels_per_head == -1:
             block_kwargs.update(num_heads=1)
@@ -1231,7 +1285,6 @@ def SongUNetHPX256(in_channels: int, out_channels: int, **kwargs) -> SongUNet:
         in_channels=in_channels, out_channels=out_channels, domain=domain, **config
     )
 
-
 def SongUNetHPX1024(
     in_channels: int, out_channels: int, img_resolution: int, level: int, **kwargs
 ) -> SongUNet:
@@ -1241,6 +1294,40 @@ def SongUNetHPX1024(
     )
     config = {
         "add_spatial_embedding": True,
+        "mixing_type": "xt",
+        "patched": True,
+        "attn_resolutions": [28],
+        "channel_mult": [1, 2, 2, 2, 2],
+        "channel_mult_noise": 1,
+        "dropout": 0.0,
+        "embedding_type": "positional",
+        "encoder_type": "standard",
+        "decoder_type": "standard",
+        "resample_filter": [1, 1],
+        "label_dim": 0,
+    }
+    config.update(kwargs)
+    return SongUNet(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        domain=domain,
+        **config,
+    )
+
+def SongUNetHPX1024Video(
+    in_channels: int, out_channels: int, img_resolution: int, level: int, time_length: int, **kwargs
+) -> SongUNet:
+    """Unet for patched HPX1024 resolution"""
+    domain = PatchedHealpixDomain(
+        Grid(level=level, pixel_order=PixelOrder.NEST), patch_size=img_resolution
+    )
+    config = {
+        "add_spatial_embedding": True,
+        "temporal_attention_resolutions": [8, 16, 32, 64],
+        "decoder_start_with_temporal_attention": True,
+        "upsample_temporal_attention": True,
+        "channels_per_head": 64,
+        "time_length": time_length,
         "mixing_type": "xt",
         "patched": True,
         "attn_resolutions": [28],

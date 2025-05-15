@@ -656,6 +656,7 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         land_path: str = config.LAND_DATA_URL_6,
         sst_monmean_path: str = config.SST_MONMEAN_DATA_URL_6,
         cache: bool = False,
+        time_length: int = 1, 
     ):
         """
         Args:
@@ -682,6 +683,8 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         self.res_level = earth2grid.healpix.npix2level(self.npix)
         self.sst = sst
         self.cache = cache
+        self.time_length = time_length
+        self.time_interval = 2 # unit of 30 minutes
 
         if self.sst:
             self.sst_ds = xarray.open_zarr(sst_monmean_path)
@@ -871,51 +874,70 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         return np.expand_dims(out, axis=0)
 
     def __getitem__(self, i):
-        raw = self.get_nest_map_for_time_index(self.time_index[i])
-        raw = {k: torch.tensor(v) for k, v in raw.items()}
-        outp = self.pack_outputs(raw)
+        outp = []
+        labels = []
+        conds = []
+        second_of_day = []
+        day_of_year = []
+        timestamps = []
+        indices = []
 
-        if self.normalize:
-            outp = (outp - self._mean) / self._scale
-
-        if self.sst:
-            cond = self.get_ts_monmean_for_time_index(self.time_index[i])
-            cond = torch.tensor(cond, dtype=torch.float32)
+        for t in range(self.time_length):
+            raw = self.get_nest_map_for_time_index(self.time_index[i+self.time_interval*t])
+            raw = {k: torch.tensor(v) for k, v in raw.items()}
+            out = self.pack_outputs(raw)
 
             if self.normalize:
-                cond = (cond - self._cond_mean) / self._cond_scale
+                out = (out - self._mean) / self._scale
 
-        if self.healpixpad_order:
-            outp = self.grid.reorder(
-                earth2grid.healpix.HEALPIX_PAD_XY, outp
-            )  # (cin, npix)
             if self.sst:
-                cond = self.grid.reorder(
-                    earth2grid.healpix.HEALPIX_PAD_XY, cond
+                cond = self.get_ts_monmean_for_time_index(self.time_index[i])
+                cond = torch.tensor(cond, dtype=torch.float32)
+
+                if self.normalize:
+                    cond = (cond - self._cond_mean) / self._cond_scale
+
+            if self.healpixpad_order:
+                out = self.grid.reorder(
+                    earth2grid.healpix.HEALPIX_PAD_XY, out
                 )  # (cin, npix)
+                if self.sst:
+                    cond = self.grid.reorder(
+                        earth2grid.healpix.HEALPIX_PAD_XY, cond
+                    )  # (cin, npix)
 
-        outp = outp.unsqueeze(1)
-        if self.sst:
-            cond = cond.unsqueeze(1)
-        else:
-            cond = outp[
-                0:0
-            ]  # empty condition rather than None makes downstream code easier
+            outp.append(out.unsqueeze(1))
+            if self.sst:
+                conds.append(cond.unsqueeze(1))
+            else:
+                conds.append(out[
+                    0:0
+                ])  # empty condition rather than None makes downstream code easier
 
-        labels = torch.nn.functional.one_hot(
-            torch.tensor(self.LABEL), num_classes=MAX_CLASSES
-        )
+            labels.append(torch.nn.functional.one_hot(
+                torch.tensor(self.LABEL), num_classes=MAX_CLASSES
+            ))
+            second_of_day.append(raw["second_of_day"][None])
+            day_of_year.append(raw["day_of_year"][None])
+            timestamps.append(cftime_to_timestamp(self.get_time(i)))
+            indices.append(i+self.time_interval*t)
+
+        outp = torch.stack(outp)
+        labels = torch.stack(labels)
+        # reduce dimension for healpix.pad
+        outp = outp[:,:,0]
+        # returns list for other fields
         out = {
             "target": outp,
             "labels": labels,
-            "condition": cond,
-            "second_of_day": raw["second_of_day"][None],
-            "day_of_year": raw["day_of_year"][None],
-            "timestamp": cftime_to_timestamp(self.get_time(i)),
+            "condition": conds,
+            "second_of_day": second_of_day,
+            "day_of_year": day_of_year,
+            "timestamp": timestamps,
         }
 
         if self.yield_index:
-            out["index"] = i
+            out["index"] = indices
 
         return out
 

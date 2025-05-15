@@ -40,17 +40,31 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
             )
 
     elif config.architecture == "unet_hpx1024_patch":
-        architecture = networks.SongUNetHPX1024(
-            in_channels=config.condition_channels
-            + config.out_channels
-            + config.position_embed_channels,
-            out_channels=config.out_channels,
-            img_resolution=config.img_resolution,
-            model_channels=config.model_channels,
-            pos_embed_channels=config.position_embed_channels,
-            label_dim=config.label_dim,
-            level=config.level,
-        )
+        if config.time_length > 1:
+            architecture = networks.SongUNetHPX1024Video(
+                in_channels=config.condition_channels
+                + config.out_channels
+                + config.position_embed_channels,
+                out_channels=config.out_channels,
+                img_resolution=config.img_resolution,
+                model_channels=config.model_channels,
+                time_length=config.time_length,
+                pos_embed_channels=config.position_embed_channels,
+                label_dim=config.label_dim,
+                level=config.level,
+            )
+        else:
+            architecture = networks.SongUNetHPX1024(
+                in_channels=config.condition_channels
+                + config.out_channels
+                + config.position_embed_channels,
+                out_channels=config.out_channels,
+                img_resolution=config.img_resolution,
+                model_channels=config.model_channels,
+                pos_embed_channels=config.position_embed_channels,
+                label_dim=config.label_dim,
+                level=config.level,
+            )
     else:
         raise NotImplementedError(config.architecture)
 

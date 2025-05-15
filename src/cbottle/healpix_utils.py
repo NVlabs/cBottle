@@ -90,6 +90,7 @@ def to_patches(
 ):
     stride = stride or patch_size // 2
     padding = padding or patch_size // 2
+
     padded_tensors = [healpix.pad(to_faces(a), padding=padding) for a in nest_tensors]
 
     unfold = torch.nn.Unfold(kernel_size=patch_size, stride=stride)
@@ -98,10 +99,22 @@ def to_patches(
         c = 0
         f = 1
         x = x.transpose(c, f)
-        uf = unfold(x)
-        patches = einops.rearrange(
-            uf, "f (c x y) l -> (f l) c x y", c=x.shape[1], x=patch_size, y=patch_size
-        )
+        
+        # to reduce GPU mem usage
+        if x.shape[1]>20:
+            temp = unfold(x[0:1])
+            uf = torch.zeros((12, temp.shape[1], temp.shape[2]))
+            with torch.no_grad():
+                for face in range(12):
+                    uf[face:face+1] = unfold(x[face:face+1])
+                patches = einops.rearrange(
+                    uf, "f (c x y) l -> (f l) c x y", c=x.shape[1], x=patch_size, y=patch_size
+                ).detach()
+        else:
+            uf = unfold(x)
+            patches = einops.rearrange(
+                uf, "f (c x y) l -> (f l) c x y", c=x.shape[1], x=patch_size, y=patch_size
+            )
         return torch.split(patches, batch_size, dim=0)
 
     patches = [unfold_and_batch(a) for a in padded_tensors]
