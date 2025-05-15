@@ -677,7 +677,7 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         else:
             storage_options = None
 
-        self.group = zarr.open_group(path, storage_options=storage_options)
+        self.group = zarr.open_group(path, storage_options=storage_options, mode="r")
         self.npix = self.group[self.variables_needed[0]].shape[-1]
         self.res_level = earth2grid.healpix.npix2level(self.npix)
         self.sst = sst
@@ -701,7 +701,9 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         else:
             storage_options = None
 
-        land_data = zarr.open_group(land_path, storage_options=storage_options)
+        land_data = zarr.open_group(
+            land_path, storage_options=storage_options, mode="r"
+        )
         self.land_fraction = land_data["land_fraction"][:]
 
         self._mean = torch.tensor(self.mean).unsqueeze(-1)

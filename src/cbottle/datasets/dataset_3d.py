@@ -435,6 +435,7 @@ def _get_dataset_icon(
     land_data = zarr.open_group(
         config.LAND_DATA_URL_6,
         storage_options=get_storage_options(config.LAND_DATA_PROFILE),
+        mode="r",
     )
     land_fraction = land_data["land_fraction"][:]
 
