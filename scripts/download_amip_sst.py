@@ -12,22 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-site_name: Climate in a Bottle
-site_url: https://nvlabs.github.io/cbottle/
-repo_url: https://github.com/nvlabs/cbottle
-site_author: NVIDIA
-nav: 
-  - Home: index.md
-  - Getting Started:
-      - Installation: ./installation.md
-  - Tutorials: 
-      - ICON Inference + Superresolution Training: ./tutorials.md
-      - AMIP Inference: ./amip_inference.md
-theme:
-  name: material
+from cbottle.datasets.amip_sst_loader import AmipSSTLoader
 
-# This configuration enables admonitions, allows to make them collapsible and to nest arbitrary content inside admonitions
-markdown_extensions:
-- admonition
-- pymdownx.details
-- pymdownx.superfences
+
+def main():
+    AmipSSTLoader.ensure_downloaded()
+
+
+if __name__ == "__main__":
+    main()

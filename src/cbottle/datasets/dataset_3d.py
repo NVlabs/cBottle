@@ -60,9 +60,9 @@ from cbottle.datasets.dataset_2d import (
     MAX_CLASSES,
     MONTHLY_SST,
     SST_LAND_FILL_VALUE,
-    AmipSSTDataset,
     encode_sst,
 )
+from cbottle.datasets.amip_sst_loader import AmipSSTLoader
 from cbottle.datasets.merged_dataset import TimeMergedDataset, TimeMergedMapStyle
 from cbottle.datasets.zarr_loader import ZarrLoader
 from cbottle.storage import get_storage_options
@@ -226,26 +226,22 @@ def combine_and_mask_frames(
     return frame_masker(out)
 
 
-def get_transform(
-    encode_frame: Callable,
-    frame_masker: Optional[FrameMasker] = None,
-) -> Callable:
-    """
-    Encodes frames, and in the video case combines/masks them along the time dimension.
-    """
+def _transform(
+    times: list[cftime.DatetimeGregorian],
+    data_list: list[dict],
+    *,
+    encode_frame,
+    frame_masker,
+) -> dict:
+    frames = [encode_frame(time=t, data=d) for t, d in zip(times, data_list)]
 
-    def transform(times: list[cftime.DatetimeGregorian], data_list: list[dict]) -> dict:
-        frames = [encode_frame(time=t, data=d) for t, d in zip(times, data_list)]
+    if len(frames) == 1:
+        return frames[0]
 
-        if len(frames) == 1:
-            return frames[0]
+    if frame_masker is None:
+        raise ValueError("Frame masker must be provided in video mode")
 
-        if frame_masker is None:
-            raise ValueError("Frame masker must be provided in video mode")
-
-        return combine_and_mask_frames(frames, frame_masker)
-
-    return transform
+    return combine_and_mask_frames(frames, frame_masker)
 
 
 def encode_task(
@@ -453,7 +449,8 @@ def _get_dataset_icon(
         is_land=land_fraction > 0,
     )
 
-    transform = get_transform(
+    transform = functools.partial(
+        _transform,
         encode_frame=encode_frame,
         frame_masker=frame_masker,
     )
@@ -532,7 +529,7 @@ def _get_dataset_era5(
 ):
     target_data_loader = ZarrLoader(
         path=config.V6_ERA5_ZARR,
-        storage_options=get_storage_options("pdx"),
+        storage_options=get_storage_options(config.V6_ERA5_ZARR_PROFILE),
         variables_3d=["u", "v", "t", "z"],
         variables_2d=[
             "sstk",
@@ -557,7 +554,9 @@ def _get_dataset_era5(
             HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
         )
         loaders.append(
-            AmipSSTDataset(grid, storage_options=get_storage_options("pbss"))
+            AmipSSTLoader(
+                grid,
+            )
         )
 
     metadata = DATASET_METADATA["era5"]
@@ -576,7 +575,8 @@ def _get_dataset_era5(
         encode_task, label, get_mean(), get_std(), sst_input=sst_input
     )
 
-    transform = get_transform(
+    transform = functools.partial(
+        _transform,
         encode_frame=encode_frame,
         frame_masker=frame_masker,
     )
@@ -603,7 +603,6 @@ def _encode_amip(
     data: dict[tuple[str, int | None], np.ndarray],
     *,
     label: int,
-    mask: np.ndarray,
 ):
     """
 
@@ -620,9 +619,6 @@ def _encode_amip(
     sst = data[("tosbcs", NO_LEVEL)]
     cond = encode_sst(sst)
 
-    if mask.dtype != np.bool_:
-        raise ValueError("mask must be a boolean array")
-
     def reorder(x):
         x = torch.as_tensor(x)
         return earth2grid.healpix.reorder(
@@ -634,7 +630,11 @@ def _encode_amip(
     second_of_day = (time - day_start) / datetime.timedelta(seconds=1)
     day_of_year = (time - year_start) / datetime.timedelta(seconds=86400)
 
-    target = np.where(mask, 0.0, np.nan)
+    nan_channels = [
+        INDEX.get_loc((channel, -1)) for channel in ["rlut", "rsut", "rsds"]
+    ]
+    target = np.zeros((INDEX.size, 1, 4**HPX_LEVEL * 12), dtype=np.float32)
+    target[nan_channels, ...] = np.nan
 
     out = {
         "target": torch.tensor(target),
@@ -667,23 +667,21 @@ def get_amip_dataset(
     if shuffle:
         raise NotImplementedError("Shuffling not implemented for AMIP dataset.")
 
-    # get mask for era5 data
-    era5_ds = _get_dataset_era5(split="test", infinite=False)
-    batch = next(iter(era5_ds))
-    mask = ~batch["target"].isnan().numpy()
-
     metadata = DATASET_METADATA["amip"]
     times = pd.date_range(metadata.start, metadata.end, freq=metadata.freq)
 
     grid = earth2grid.healpix.Grid(
         HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
     )
-    loaders = [AmipSSTDataset(grid, storage_options=get_storage_options("pbss"))]
-    encode_frame = functools.partial(
-        _encode_amip, label=LABELS.index("era5"), mask=mask
-    )
+    loaders = [
+        AmipSSTLoader(
+            grid,
+        )
+    ]
+    encode_frame = functools.partial(_encode_amip, label=LABELS.index("era5"))
 
-    transform = get_transform(
+    transform = functools.partial(
+        _transform,
         encode_frame=encode_frame,
         frame_masker=frame_masker,
     )

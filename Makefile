@@ -9,7 +9,10 @@ format:
 	python -m ruff format
 
 docs:
-	uvx mkdocs build
+	uvx --with mkdocs-material mkdocs build
+
+docs-serve:
+	uvx --with mkdocs-material mkdocs serve
 
 pytest:
 	torchrun --nproc_per_node 1 -m pytest -vv -rs

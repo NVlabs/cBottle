@@ -19,10 +19,6 @@ See [installation](docs/installation.md) instructions.
 python3 scripts/train_coarse.py --loop.noise_distribution log_uniform --loop.sigma_min 0.02 --loop.sigma_max 200 --loop.label_dropout 0.25 --loop.batch_gpu 4 --loop.batch_size 64 --loop.dataloader_num_workers 8 --loop.with_era5 --loop.use_labels  --loop.data_version 6 --loop.monthly_sst_input --name v6data  --loop.dataloader_prefetch_factor 100
 ```
 
-### Inference
-
-See `scripts/inference_coarse.py`.
-
 ## Coarse Video Model (cBottle-video)
 
 ###

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from cbottle.datasets.dataset_2d import AmipSSTDataset
+from cbottle.datasets.amip_sst_loader import AmipSSTLoader
 from cbottle.datasets import dataset_3d
 from cbottle.datasets.dataset_3d import INDEX
 from cbottle.storage import StorageConfigError
@@ -26,7 +26,7 @@ nchannel = len(INDEX)
 
 def test_AmipSSTDataset():
     try:
-        ds = AmipSSTDataset()
+        ds = AmipSSTLoader()
     except (FileNotFoundError, PermissionError):
         pytest.skip()
 

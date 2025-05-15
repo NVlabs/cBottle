@@ -17,12 +17,16 @@ import dotenv
 
 dotenv.load_dotenv(dotenv.find_dotenv(usecwd=True))
 
+CACHE_DIR = os.path.expanduser("~/.cache/cbottle")
+
 # slurm submission info
 SUBMIT_ACCOUNT = os.getenv("SUBMIT_ACCOUNT")
 SUBMIT_SCRIPT = os.getenv("SUBMIT_SCRIPT", "../../ord_scripts/submit_ord.sh")
 
 # data
 V6_ERA5_ZARR = os.getenv("V6_ERA5_ZARR", "s3://ERA5_hpx_zarrs/era5_hpx_6.zarr/")
+V6_ERA5_ZARR_PROFILE = os.getenv("V6_ERA5_ZARR_PROFILE", "")
+
 RAW_DATA_URL_7 = "s3://ICON_cycle3_ngc3028/ngc3028_PT30M_7.zarr/"
 RAW_DATA_URL_6 = os.getenv(
     "RAW_DATA_URL_6", "s3://ICON_cycle3_ngc3028/ngc3028_PT30M_6.zarr/"
@@ -35,10 +39,10 @@ RAW_DATA_URL = "s3://ICON_cycle3_ngc3028/ngc3028_PT30M_10.zarr/"
 V6_ICON_ZARR = os.getenv(
     "V6_ICON_ZARR", "s3://asubramaniam-testing/ICON_v6_dataset.zarr/"
 )
-V6_ICON_ZARR_PROFILE = "pbss"
-RAW_DATA_PROFILE = "pbss"
-SST_MONMEAN_DATA_PROFILE = "pbss"
-LAND_DATA_PROFILE = "pbss"
+V6_ICON_ZARR_PROFILE = os.getenv("V6_ICON_ZARR_PROFILE", "")
+RAW_DATA_PROFILE = os.getenv("RAW_DATA_PROFILE", "")
+SST_MONMEAN_DATA_PROFILE = os.getenv("SST_MONMEAN_DATA_PROFILE", "")
+LAND_DATA_PROFILE = os.getenv("LAND_DATA_PROFILE", "")
 
 LAND_DATA_URL_10 = os.getenv(
     "LAND_DATA_URL_10", "s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_10.zarr/"
@@ -63,8 +67,12 @@ ERA5_NPY_PATH_4 = os.getenv("ERA5_NPY_PATH_4", "")
 # Data is downloaded from the https://aims2.llnl.gov/search
 AMIP_MID_MONTH_SST = os.getenv(
     "AMIP_MID_MONTH_SST",
-    "s3://input4MIPs/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc",
+    os.path.join(
+        CACHE_DIR,
+        "tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc",
+    ),
 )
+AMIP_MID_MONTH_SST_PROFILE = os.getenv("AMIP_MID_MONTH_SST_PROFILE", "")
 
 # project file
 PROJECT_ROOT = os.getenv(
