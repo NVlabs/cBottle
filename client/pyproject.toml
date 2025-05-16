@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cbottle_client"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.11.18",
+    "xarray>=2025.4.0",
+    "zarr>=3",
+]
+
+[tool.setuptools]
+py-modules = ["cbottle_client"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]
