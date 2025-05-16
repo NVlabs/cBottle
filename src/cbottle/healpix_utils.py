@@ -18,7 +18,8 @@ import earth2grid
 import random
 import torch
 import einops
-import time
+from functools import lru_cache
+
 
 def hpxpad2ring(x):
     return healpix.reorder(x, healpix.HEALPIX_PAD_XY, healpix.PixelOrder.RING)
@@ -58,6 +59,17 @@ def average_pool(map):
     return map.reshape(shape + (npix // 4, 4)).mean(-1)
 
 
+@lru_cache(maxsize=4)
+def _get_regridder_cached(level: int, device_str: str):
+    """
+    Build once and cache a regridder for a given healpix level and device.
+    """
+    src_grid = earth2grid.healpix.Grid(level=level, pixel_order=healpix.PixelOrder.NEST)
+    dest_grid = earth2grid.healpix.Grid(level=level, pixel_order=healpix.HEALPIX_PAD_XY)
+    regridder = earth2grid.get_regridder(src_grid, dest_grid).float()
+    return regridder.to(torch.device(device_str))
+
+
 def to_faces(map):
     """Give a padded view of the data in a NEST convention map
 
@@ -65,14 +77,7 @@ def to_faces(map):
 
     """
     hpx_level = healpix.npix2level(map.shape[-1])
-    src_grid = earth2grid.healpix.Grid(
-        level=hpx_level, pixel_order=healpix.PixelOrder.NEST
-    )
-    dest_grid = earth2grid.healpix.Grid(
-        level=hpx_level, pixel_order=healpix.HEALPIX_PAD_XY
-    )
-    regridder = earth2grid.get_regridder(src_grid, dest_grid).float().to(map.device)
-
+    regridder = _get_regridder_cached(hpx_level, str(map.device))
     xy_map = regridder(map)
     nside = 2**hpx_level
     xy_map = xy_map.view(xy_map.shape[:-1] + (12, nside, nside))
@@ -83,6 +88,7 @@ def to_patches(
     nest_tensors,
     *,
     patch_size,
+    skip_pad_tensors=None,
     padding=None,
     stride=None,
     batch_size: int = 1,
@@ -92,6 +98,9 @@ def to_patches(
     padding = padding or patch_size // 2
 
     padded_tensors = [healpix.pad(to_faces(a), padding=padding) for a in nest_tensors]
+    if skip_pad_tensors is not None:
+        for tensor in skip_pad_tensors:
+            padded_tensors.append(tensor)
     del nest_tensors
     torch.cuda.empty_cache()
 

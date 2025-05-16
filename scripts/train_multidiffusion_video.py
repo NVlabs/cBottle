@@ -15,6 +15,8 @@
 import os
 import torch
 import time
+import random
+import numpy as np
 import earth2grid
 import argparse
 import einops
@@ -26,6 +28,7 @@ from cbottle.datasets.dataset_2d import HealpixDatasetV5
 import cbottle.config.environment as config
 from cbottle import distributed as cbottle_dist
 import torch.distributed as dist
+
 
 class EDMLossSR:
     def __init__(
@@ -150,6 +153,119 @@ def build_optimizer(net, temporal_lr=4e-2, pos_embed_lr=1e-1, warmup_lr=1e-4):
     })
     return torch.optim.SGD(groups, momentum=0.9)
 
+class BatchedPatchStreamer:
+    def __init__(
+        self,
+        net: torch.nn.Module,
+        training_dataset_grid: earth2grid.healpix.Grid,
+        lr_level: int,
+        time_length: int,
+        img_resolution: int,
+        padding: int = None,
+    ):
+        self.net = net
+        self.lr_level = lr_level
+        self.time_length = time_length
+        self.img_resolution = img_resolution
+        self.sr_level = training_dataset_grid.level
+        self.padding = padding or img_resolution // 2
+
+        # Setup regridders
+        low_res_grid = earth2grid.healpix.Grid(
+            lr_level, pixel_order=earth2grid.healpix.PixelOrder.NEST
+        )
+        lat = torch.linspace(-90, 90, 128)[:, None]
+        lon = torch.linspace(0, 360, 128)[None, :]
+        self.regrid_to_latlon = low_res_grid.get_bilinear_regridder_to(lat, lon).cuda()
+        self.regrid = earth2grid.get_regridder(low_res_grid, training_dataset_grid)
+        self.regrid.cuda().float()
+        self.coordinate_map = self.make_coordinate_map(self.sr_level, self.padding)
+
+    @staticmethod
+    def make_coordinate_map(level: int, padding: int, device="cuda") -> torch.Tensor:
+        """
+        Returns a tensor of shape (1, 12 * X * Y)
+        Pixel ID layout:
+            id = face * X * Y + row * Y + col
+        """
+        nside = 2**level
+        nside_padded = nside + 2 * padding
+        ids = torch.arange(12 * nside_padded**2, dtype=torch.float32, device=device)
+        ids = ids.view(1, 12, nside_padded, nside_padded)
+        return ids
+
+    def __call__(self, batch, batch_size):
+        data = batch["target"].cuda(non_blocking=True)
+        data = einops.rearrange(data, "t c x -> (t c) x")
+        target = data
+
+        # Get low res version
+        lr = data.clone()
+        lr[1:-1] = 0  # set lr to zero for middle frames
+        for _ in range(self.sr_level - self.lr_level):
+            lr = healpix_utils.average_pool(lr)
+        global_lr = self.regrid_to_latlon(lr.double())[None,].cuda()
+        lr = self.regrid(lr)
+
+        # Create patches
+        patches = healpix_utils.to_patches(
+            [target, lr],
+            patch_size=self.img_resolution,
+            batch_size=batch_size,
+            padding=self.padding,
+            skip_pad_tensors=[self.coordinate_map],
+        )
+        del target, data, lr
+
+        for ltarget, llr, patch_coord_map, _ in patches:
+            # decode id to get the patch coordinates
+            ids = patch_coord_map[:, 0, 0, 0].long()  # top-left ID of every patch
+            npix_padded = self.coordinate_map.shape[-1]
+            face, rem = (
+                torch.div(ids, npix_padded**2, rounding_mode="floor"),
+                torch.remainder(ids, npix_padded**2),
+            )
+            row, col = (
+                torch.div(rem, npix_padded, rounding_mode="floor"),
+                torch.remainder(rem, npix_padded),
+            )
+
+            faces_pe = healpix_utils.to_faces(self.net.module.model.pos_embed)
+            padded_pe = earth2grid.healpix.pad(faces_pe, padding=self.padding)
+
+            # get the positional embedding slice corresponding to each patch
+            lpe = torch.stack(
+                [
+                    padded_pe[
+                        :,
+                        int(f),
+                        int(r) : int(r) + self.img_resolution,
+                        int(c) : int(c) + self.img_resolution,
+                    ]
+                    for f, r, c in zip(face, row, col)
+                ],
+                dim=0,
+            )
+
+            global_lr_repeat = einops.repeat(
+                global_lr,
+                "1 (t c) x y -> (b t) c x y",
+                b=llr.shape[0],
+                t=self.time_length,
+            )
+            lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=self.time_length)
+            llr = einops.rearrange(
+                llr.cuda(), "b (t c) x y -> (b t) c x y", t=self.time_length
+            )
+            ltarget = einops.rearrange(
+                ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=self.time_length
+            )
+
+            llr = torch.cat((llr, global_lr_repeat), dim=1)
+
+            yield lpe, ltarget, llr
+
+
 def train(
     output_path: str,
     customized_dataset=None,
@@ -225,14 +341,7 @@ def train(
         sampler=test_sampler,
         num_workers=0,
     )
-    low_res_grid = earth2grid.healpix.Grid(
-        lr_level, pixel_order=earth2grid.healpix.PixelOrder.NEST
-    )
-    lat = torch.linspace(-90, 90, 128)[:, None]
-    lon = torch.linspace(0, 360, 128)[None, :]
-    regrid_to_latlon = low_res_grid.get_bilinear_regridder_to(lat, lon).cuda()
-    regrid = earth2grid.get_regridder(low_res_grid, training_dataset.grid)
-    regrid.cuda().float()
+
     loss_fn = EDMLossSR(P_mean=0.0)
     out_channels = len(training_dataset.fields_out)
 
@@ -287,6 +396,20 @@ def train(
         if WORLD_RANK == 0:
             print("Could not load network and optimizer states")
 
+    # seed based on step and rank
+    np.random.seed((WORLD_RANK + step) % (1 << 31))
+    np_seed = np.random.randint(1 << 31)
+    torch.manual_seed(np_seed)
+    random.seed(np_seed)
+
+    patch_streamer = BatchedPatchStreamer(
+        net=net,
+        training_dataset_grid=training_dataset.grid,
+        lr_level=lr_level,
+        time_length=time_length,
+        img_resolution=img_resolution,
+    )
+
     # training loop
     old_pos = None
     old_pos2 = None
@@ -301,50 +424,18 @@ def train(
 
     while True:
         for batch in training_loader:
-            data = batch["target"].cuda(non_blocking=True)
-            data = einops.rearrange(data, "t c x -> (t c) x")
-            target = data
-            # get low res
-            # set lr to zero for middle frames
-            lr = data.clone()
-            lr[1:-1] = 0
-            for _ in range(training_dataset.grid.level - low_res_grid.level):
-                lr = healpix_utils.average_pool(lr)
-            global_lr = regrid_to_latlon(lr.double())[None,].cuda() # (1, T*C, x, y)
-            lr = regrid(lr) # (T*C, X)
-            train_patches = healpix_utils.to_patches(
-                [net.module.model.pos_embed, target, lr],
-                patch_size=img_resolution,
-                batch_size=train_batch_size,
-            )
-            del data, target, lr
- 
-            for lpe, ltarget, llr, end_flag in train_patches:
+            for lpe, ltarget, llr in patch_streamer(batch, train_batch_size):
                 step += 1
                 optimizer.zero_grad()
                 with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    global_lr_repeat = einops.repeat(
-                        global_lr,
-                        '1 (t c) x y -> (b t) c x y',
-                        b=llr.shape[0],
-                        t=time_length,
-                    )
-                    llr = einops.rearrange(llr.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
-                    ltarget = einops.rearrange(ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
-                    lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=time_length)
-
                     # Compute the loss and its gradients
-                    llr = torch.cat((llr, global_lr_repeat), dim=1)
                     loss = loss_fn(net, img_clean=ltarget, img_lr=llr, pos_embed=lpe)
                     loss = loss.mean()
-                # destroy the current graph if end_flag is given
-                if end_flag:
-                    loss.backward()
-                else:
-                    loss.backward(retain_graph=True)
+                loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(net.parameters(), 50)
                 optimizer.step()
                 # avoid synchronizing gpu
+                loss = loss.detach()
                 dist.all_reduce(loss)
                 running_loss += loss.item()
 
@@ -353,51 +444,15 @@ def train(
                     with torch.no_grad():
                         val_running_loss = 0
                         for batch in test_loader:
-                            data = batch["target"].cuda(non_blocking=True)
-                            data = einops.rearrange(data, "t c x -> (t c) x")
-                            target = data
-                            # get low res
-                            lr = data.clone()
-                            lr[1:-1] = 0
-                            for _ in range(
-                                training_dataset.grid.level - low_res_grid.level
-                            ):
-                                lr = healpix_utils.average_pool(lr)
-                            global_lr = regrid_to_latlon(lr.double())[None,].cuda()
-                            lr = regrid(lr)
-                            # validation loss
                             count = 0
-
-                            test_patches = healpix_utils.to_patches(
-                                [net.module.model.pos_embed, target, lr],
-                                patch_size=img_resolution,
-                                batch_size=test_batch_size,
-                            )
-                            del data, target, lr
-
-                            for lpe, ltarget, llr, _ in test_patches:  
-                                global_lr_repeat = einops.repeat(
-                                    global_lr,
-                                    '1 (t c) x y -> (b t) c x y',
-                                    b=llr.shape[0],
-                                    t=time_length,
-                                )
-                                llr = einops.rearrange(llr.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
-                                ltarget = einops.rearrange(ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=time_length) 
-                                lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=time_length)
-
-                                llr = torch.cat(
-                                    (llr, global_lr_repeat),
-                                    dim=1,
-                                )
-                                loss = loss_fn(
-                                    net, img_clean=ltarget, img_lr=llr, pos_embed=lpe
-                                )
+                            for lpe, ltarget, llr in patch_streamer(batch, test_batch_size):
+                                loss = loss_fn(net, img_clean=ltarget, img_lr=llr, pos_embed=lpe)
                                 loss = loss.mean()
                                 dist.all_reduce(loss)
                                 count += 1
                                 val_running_loss += loss
-                                break
+                                if count == 10:
+                                    break
                             break
 
                         # print out
