@@ -1,0 +1,56 @@
+events {
+    worker_connections 1024;
+}
+
+pid /opt/scripts/nginx.pid;
+
+http {
+    proxy_cache_path /pscratch/sd/n/nbren12/nginx/cache keys_zone=mycache:10m max_size=200g inactive=7d;
+
+    upstream xarray_backend {
+        {{range service "xarray"}}
+        server {{.Address}}:{{.Port}} max_fails=3 fail_timeout=60 weight=1;
+        {{else}}
+        server 127.0.0.1:9000; # fallback
+        {{end}}
+    }
+
+    server {
+        listen 9999;
+        server_name _;
+
+        location / {
+            proxy_pass http://xarray_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # WebSocket support
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+
+            # Caching directives
+            proxy_cache mycache;
+
+            # Timeouts
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+        }
+
+        # Health check endpoint
+        location /health {
+            access_log off;
+            return 200 'healthy\n';
+        }
+    } 
+
+    # Set all cache and temp directories to be under /nginx
+    client_body_temp_path /nginx/cache/client_temp;
+    proxy_temp_path /nginx/cache/proxy_temp;
+    fastcgi_temp_path /nginx/cache/fastcgi_temp;
+    uwsgi_temp_path /nginx/cache/uwsgi_temp;
+    scgi_temp_path /nginx/cache/scgi_temp;
+}

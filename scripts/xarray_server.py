@@ -36,6 +36,7 @@ from cbottle.datasets import dataset_3d
 from cbottle.denoiser_factories import get_denoiser, DenoiserType
 from cbottle.diffusion_samplers import edm_sampler_from_sigma, StackedRandomGenerator
 import queue
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +74,20 @@ def load_model(state_path: str):
 
 
 queue = queue.Queue()
-
 _model = None
 _dataset = None
 
+_counter = threading.Semaphore(2)
 
 @dask.delayed
 def run_inference(
+    times: List[np.datetime64],
+    config: InferenceConfig,
+) -> xr.Dataset:
+    with _counter:
+        return _run_inference(times, config)
+
+def _run_inference(
     times: List[np.datetime64],
     config: InferenceConfig,
 ) -> xr.Dataset:
