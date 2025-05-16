@@ -61,12 +61,14 @@ class Checkpoint:
         with self._zip.open("net_state.pth", "w", force_zip64=True) as f:
             torch.save(net.state_dict(), f)
 
-    def read_model(self, net=None, map_location=None) -> torch.nn.Module:
+    def read_model(self, net=None, map_location=None, transfer_learning=False, load_weights=None) -> torch.nn.Module:
         """Read the model from the checkpoint
 
         Args:
             net: If provided, the state dict will be loaded into this net.
-            Otherwise, a new model will be created.
+                Otherwise, a new model will be created.
+            map_location: Map location for torch.load
+            transfer_learning: If True, allow partial loading (non-strict) and log unmatched keys
         """
         try:
             metadata = json.loads(self._zip.read("metadata.json").decode())
@@ -83,10 +85,26 @@ class Checkpoint:
             net = cbottle.models.get_model(self.read_model_config())
 
         with self._zip.open("net_state.pth", "r") as f:
-            net.load_state_dict(
-                torch.load(f, weights_only=True, map_location=map_location)
-            )
+            state_dict = torch.load(f, weights_only=True, map_location=map_location)
+
+            if transfer_learning:
+                missing_keys, unexpected_keys = net.load_state_dict(state_dict, strict=False)
+                loaded_keys = [k for k in state_dict.keys() if k not in unexpected_keys]
+                if missing_keys:
+                    print("Missing keys:")
+                    for k in missing_keys:
+                        print(f"  - {k}")
+                if unexpected_keys:
+                    print("Unexpected keys:")
+                    for k in unexpected_keys:
+                        print(f"  - {k}")
+                print(f"Loaded {len(loaded_keys)} layers from checkpoint.")
+                return net, bool(missing_keys or unexpected_keys)
+            else:
+                net.load_state_dict(state_dict, strict=True)
+
         return net
+
 
     def read_model_config(self) -> cbottle.config.models.ModelConfigV1:
         return cbottle.config.models.ModelConfigV1.loads(

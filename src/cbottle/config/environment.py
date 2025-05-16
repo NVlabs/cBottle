@@ -33,7 +33,7 @@ RAW_DATA_URL_6 = os.getenv(
 RAW_DATA_URL_4 = os.getenv(
     "RAW_DATA_URL_4", "s3://ICON_cycle3_ngc3028/ngc3028_PT30M_4.zarr/"
 )
-RAW_DATA_URL = "/global/cfs/cdirs/trn006/data/nvidia/ngc3028_PT30M_4weeks_10.zarr/"
+RAW_DATA_URL = "/global/cfs/cdirs/trn006/data/nvidia/ngc3028_PT30M_5months_new.zarr/"
 
 V6_ICON_ZARR = os.getenv(
     "V6_ICON_ZARR", "/global/cfs/cdirs/trn006/data/nvidia/ICON_v6_dataset.zarr/"

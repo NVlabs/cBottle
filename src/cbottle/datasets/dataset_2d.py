@@ -404,7 +404,7 @@ import zict
 from cbottle.config import environment as config
 from cbottle.datasets.base import BatchInfo, TimeUnit
 from cbottle.datetime import as_cftime, second_of_day
-
+from datetime import timedelta
 from cbottle.models.embedding import FrequencyEmbedding
 
 # Number of classes to label datasets with. Use a high number for some breathing
@@ -720,12 +720,6 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
             else self.group[field]
             for field in self.variables_needed
         }
-        num_time = self.group["time"].shape[0]
-
-        # train test split
-        num_time = self.group["cllvi"].shape[0]
-        n_valid = num_time // 4
-        n_train = num_time - n_valid
 
         time_v = self.group["time"]
         # use the xarray cftime index for convenience
@@ -737,14 +731,27 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
                 units=time_v.attrs["units"],
             )
         )
-
+        self.full_times = times
+        # Split based on year: 2025 → test, others → train
+        is_test = np.array([t.year == 2025 for t in times])
         if train:
-            self.time_index = np.arange(n_train)
+            self.time_index = np.where(~is_test)[0]  # train = not 2025
         else:
-            self.time_index = np.arange(n_train, num_time)
+            self.time_index = np.where(is_test)[0]   # test = 2025
 
-        self.times = times[self.time_index]
-
+        # Initial full list of times
+        self.times_including_ends = times[self.time_index]
+        self.dt = timedelta(minutes=self.time_interval * 30 )
+        # Only keep times t where all [t + l * interval * 30min] are also in the list
+        valid_set = set(self.times_including_ends)
+        valid_times = []
+        valid_index = []
+        for i, t in enumerate(self.times_including_ends):
+            if all(t + l * self.dt in valid_set for l in range(self.time_length)):
+                valid_times.append(t)
+                valid_index.append(self.time_index[i])
+        self.time_index = valid_index
+        self.times = xarray.CFTimeIndex(valid_times)
     def compute_normalization(self):
         """
         Will compute mean scale, values are hardcoded in __init__ for simplicity
@@ -797,7 +804,7 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         return {}
 
     def __len__(self):
-        return len(self.time_index) - (self.time_length-1) * self.time_interval
+        return len(self.time_index)
 
     def randomize_initial_time(self):
         self.initial_time = random.randint(0, self.time_index.size - 1)
@@ -883,8 +890,18 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
         timestamps = []
         indices = []
 
+        # ugly time slicing for safety
+        starting_t = self.get_time(self.time_index[i])
         for t in range(self.time_length):
-            raw = self.get_nest_map_for_time_index(self.time_index[i+self.time_interval*t])
+            current_t = starting_t + self.dt*t
+            try:
+                current_t_idx = self.full_times.get_loc(current_t)
+            except KeyError:
+                print(f"{current_t} not exist, use {starting_t} instead")
+                current_t_idx = self.time_index[i]
+          
+            print(f"current loading time: {current_t}, corresponding index: {current_t_idx}")
+            raw = self.get_nest_map_for_time_index(current_t_idx)
             raw = {k: torch.tensor(v) for k, v in raw.items()}
             out = self.pack_outputs(raw)
 

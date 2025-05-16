@@ -16,7 +16,6 @@ import os
 import torch
 import time
 import earth2grid
-import torch.distributed as dist
 import argparse
 import einops
 import cbottle.models
@@ -25,6 +24,8 @@ from cbottle import healpix_utils
 import cbottle.checkpointing
 from cbottle.datasets.dataset_2d import HealpixDatasetV5
 import cbottle.config.environment as config
+from cbottle import distributed as cbottle_dist
+import torch.distributed as dist
 
 class EDMLossSR:
     def __init__(
@@ -56,20 +57,27 @@ class EDMLossSR:
         return loss
 
 
-def load_checkpoint(path: str, *, network, optimizer, scheduler, map_location) -> int:
+def load_checkpoint(path: str, *, network, optimizer, scheduler, map_location, transfer_learning) -> int:
     with cbottle.checkpointing.Checkpoint(path) as checkpoint:
-        if isinstance(network, torch.nn.parallel.DistributedDataParallel):
-            checkpoint.read_model(net=network.module)
+        if transfer_learning:
+            if isinstance(network, torch.nn.parallel.DistributedDataParallel):
+                _, unmatched_weights = checkpoint.read_model(net=network.module, transfer_learning=transfer_learning)
+            else:
+                _, unmatched_weights = checkpoint.read_model(net=network, transfer_learning=transfer_learning)
+            if unmatched_weights:
+                return 0
         else:
-            checkpoint.read_model(net=network)
-
+            if isinstance(network, torch.nn.parallel.DistributedDataParallel):
+                checkpoint.read_model(net=network.module, transfer_learning=transfer_learning)
+            else:
+                checkpoint.read_model(net=network, transfer_learning=transfer_learning)
+       
         with checkpoint.open("loop_state.pth", "r") as f:
             training_state = torch.load(f, weights_only=True, map_location=map_location)
             optimizer.load_state_dict(training_state["optimizer_state_dict"])
             scheduler.load_state_dict(training_state["scheduler_state_dict"])
             step = training_state["step"]
-
-    return step
+        return step
 
 
 def save_checkpoint(path, *, model_config, network, optimizer, scheduler, step, loss):
@@ -122,37 +130,50 @@ class Mockdataset(torch.utils.data.Dataset):
     def __len__(self):
         return 1
 
+def build_optimizer(net, temporal_lr=4e-2, pos_embed_lr=1e-1, warmup_lr=1e-4):
+    groups = []
+    groups.append({
+        "params": [p for n, p in net.named_parameters()
+                   if "temporal_attention" not in n and "pos_embed" not in n],
+        "lr": warmup_lr,
+        "tag": "base"
+    })
+    groups.append({
+        "params": [p for n, p in net.named_parameters() if "temporal_attention" in n],
+        "lr": temporal_lr,
+        "tag": "temporal"
+    })
+    groups.append({
+        "params": [p for n, p in net.named_parameters() if "pos_embed" in n],
+        "lr": pos_embed_lr,
+        "tag": "pos_embed"
+    })
+    return torch.optim.SGD(groups, momentum=0.9)
 
 def train(
     output_path: str,
     customized_dataset=None,
     lr_level=6,
-    train_batch_size=2,
-    test_batch_size=4,
+    train_batch_size=8,
+    test_batch_size=16,
     valid_min_samples: int = 1,
     num_steps: int = int(4e7),
     log_freq: int = 1000,
     test_fast: bool = False,
     time_length: int = 7,
+    transfer_learning: bool = False,
 ):
     """
     Args:
         test_fast: used for rapid testing. E.g. uses mocked data to avoid
             network I/O.
     """
-    LOCAL_RANK = int(os.getenv("LOCAL_RANK", 0))
-    WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
-    WORLD_RANK = int(os.getenv("RANK", 0))
 
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "12345")
+    cbottle_dist.init()
 
-    if not dist.is_initialized():
-        dist.init_process_group(
-            backend="nccl", init_method="env://", world_size=WORLD_SIZE, rank=WORLD_RANK
-        )
-
-    torch.cuda.set_device(LOCAL_RANK)
+    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
+    WORLD_SIZE = cbottle_dist.get_world_size()
+    WORLD_RANK = cbottle_dist.get_rank()
 
     os.makedirs(output_path, exist_ok=True)
     training_sampler = None
@@ -212,7 +233,7 @@ def train(
     regrid_to_latlon = low_res_grid.get_bilinear_regridder_to(lat, lon).cuda()
     regrid = earth2grid.get_regridder(low_res_grid, training_dataset.grid)
     regrid.cuda().float()
-    loss_fn = EDMLossSR()
+    loss_fn = EDMLossSR(P_mean=0.0)
     out_channels = len(training_dataset.fields_out)
 
     # the model takes in both local and global lr channels
@@ -234,17 +255,9 @@ def train(
     )
 
     # optimizer
-    params = list(filter(lambda kv: "pos_embed" in kv[0], net.named_parameters()))
-    base_params = list(
-        filter(lambda kv: "pos_embed" not in kv[0], net.named_parameters())
-    )
-    params = [i[1] for i in params]
-    base_params = [i[1] for i in base_params]
-    optimizer = torch.optim.SGD(
-        [{"params": base_params}, {"params": params, "lr": 5e-4}], lr=1e-7, momentum=0.9
-    )
-
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50000, gamma=0.6)
+    optimizer = build_optimizer(net)
+    warmup_steps = 2000
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20000, gamma=0.6)
     tic = time.time()
     step = 0
     train_loss_list = []
@@ -263,6 +276,7 @@ def train(
             optimizer=optimizer,
             scheduler=scheduler,
             map_location=map_location,
+            transfer_learning=transfer_learning,
         )
         step = step + 1
         print(f"Loaded network and optimizer states from {path}")
@@ -278,6 +292,8 @@ def train(
     old_pos2 = None
     old_conv = None
     old_conv2 = None
+    old_temporal = None
+    old_temporal2 = None
     running_loss = 0
 
     if WORLD_RANK == 0:
@@ -307,26 +323,26 @@ def train(
                 step += 1
                 optimizer.zero_grad()
                 with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    llr = einops.rearrange(llr.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
-                    ltarget = einops.rearrange(ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
                     global_lr_repeat = einops.repeat(
                         global_lr,
                         '1 (t c) x y -> (b t) c x y',
-                        b=train_batch_size,
+                        b=llr.shape[0],
                         t=time_length,
                     )
+                    llr = einops.rearrange(llr.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
+                    ltarget = einops.rearrange(ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
                     lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=time_length)
 
                     # Compute the loss and its gradients
                     llr = torch.cat((llr, global_lr_repeat), dim=1)
                     loss = loss_fn(net, img_clean=ltarget, img_lr=llr, pos_embed=lpe)
-                    loss = loss.sum()
+                    loss = loss.mean()
                 # destroy the current graph if end_flag is given
                 if end_flag:
                     loss.backward()
                 else:
                     loss.backward(retain_graph=True)
-                grad_norm = torch.nn.utils.clip_grad_norm_(net.parameters(), 1e6)
+                grad_norm = torch.nn.utils.clip_grad_norm_(net.parameters(), 50)
                 optimizer.step()
                 # avoid synchronizing gpu
                 dist.all_reduce(loss)
@@ -351,6 +367,7 @@ def train(
                             lr = regrid(lr)
                             # validation loss
                             count = 0
+
                             test_patches = healpix_utils.to_patches(
                                 [net.module.model.pos_embed, target, lr],
                                 patch_size=img_resolution,
@@ -359,14 +376,14 @@ def train(
                             del data, target, lr
 
                             for lpe, ltarget, llr, _ in test_patches:  
-                                llr = einops.rearrange(llr.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
-                                ltarget = einops.rearrange(ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
                                 global_lr_repeat = einops.repeat(
                                     global_lr,
                                     '1 (t c) x y -> (b t) c x y',
-                                    b=test_batch_size,
+                                    b=llr.shape[0],
                                     t=time_length,
                                 )
+                                llr = einops.rearrange(llr.cuda(), "b (t c) x y -> (b t) c x y", t=time_length)
+                                ltarget = einops.rearrange(ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=time_length) 
                                 lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=time_length)
 
                                 llr = torch.cat(
@@ -376,7 +393,7 @@ def train(
                                 loss = loss_fn(
                                     net, img_clean=ltarget, img_lr=llr, pos_embed=lpe
                                 )
-                                loss = loss.sum()
+                                loss = loss.mean()
                                 dist.all_reduce(loss)
                                 count += 1
                                 val_running_loss += loss
@@ -386,22 +403,23 @@ def train(
                         # print out
                         if WORLD_RANK == 0:
                             train_loss_list.append(
-                                running_loss / log_freq / WORLD_SIZE / train_batch_size
+                                running_loss / log_freq / WORLD_SIZE
                             )
                             val_loss_list.append(
                                 val_running_loss
                                 / len(test_loader)
                                 / count
                                 / WORLD_SIZE
-                                / test_batch_size
                             )
                             pos = net.module.model.pos_embed.detach().clone()
                             for name, para in net.named_parameters():
                                 if "enc.128x128_conv.weight" in name:
                                     conv = para.detach().clone()
-                            gpu_memory_used = torch.cuda.memory_allocated() / (
-                                1024 * 1024 * 1024
-                            )  # Convert to GB
+                                    break
+                            for name, para in net.named_parameters():
+                                if "temporal_attention" in name:
+                                    temporal = para.detach().clone()
+                                    break
                             peak_gpu_memory_reserved = torch.cuda.max_memory_reserved() / (
                                 1024 * 1024 * 1024
                             )
@@ -436,28 +454,34 @@ def train(
                                     .detach()
                                     .numpy()
                                 )
+                                a = torch.sqrt(torch.sum((temporal - old_temporal) ** 2))
+                                b = torch.sqrt(torch.sum((old_temporal - old_temporal2) ** 2))
+                                corr_temporal = (
+                                    (
+                                        torch.sum(
+                                            (temporal - old_temporal) * (old_temporal - old_temporal2)
+                                        )
+                                        / (a * b)
+                                    )
+                                    .cpu()
+                                    .detach()
+                                    .numpy()
+                                )
                                 print(
-                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, diff pos: {:.2e}, corr pos: {:.2f}, diff conv: {:.2e}, corr conv: {:.2f}, grad norm: {:.2e}, gpu usage: {:.3f}, peak gpu reserved: {:.3f}, peak gpu allocated: {:.3f}, time: {:6.1f} sec".format(
+                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, lrs: ({:.2e}, {:.2e}, {:.2e}), diff pos: {:.2e}, corr pos: {:.2f}, diff conv: {:.2e}, corr conv: {:.2f}, diff temporal: {:.2e}, corr temporal: {:.2f}, grad norm: {:.2e}, peak gpu reserved: {:.3f}, peak gpu allocated: {:.3f}, time: {:6.1f} sec".format(
                                         step,
                                         train_loss_list[-1],
                                         val_loss_list[-1],
-                                        torch.sum(
-                                            torch.abs(old_pos - pos) / torch.numel(pos)
-                                        )
-                                        .cpu()
-                                        .detach()
-                                        .numpy(),
+                                        optimizer.param_groups[0]['lr'],
+                                        optimizer.param_groups[1]['lr'],
+                                        optimizer.param_groups[2]['lr'],
+                                        torch.mean(torch.abs(old_pos - pos)).cpu().detach().numpy(),
                                         corr_pos,
-                                        torch.sum(
-                                            torch.abs(old_conv - conv)
-                                            / torch.numel(conv)
-                                        )
-                                        .cpu()
-                                        .detach()
-                                        .numpy(),
+                                        torch.mean(torch.abs(old_conv - conv)).cpu().detach().numpy(),
                                         corr_conv,
+                                        torch.mean(torch.abs(old_temporal - temporal)).cpu().detach().numpy(),
+                                        corr_temporal,
                                         grad_norm,
-                                        gpu_memory_used,
                                         peak_gpu_memory_reserved,
                                         peak_gpu_memory_allocated,
                                         (toc - tic),
@@ -466,12 +490,14 @@ def train(
                                 )
                             else:
                                 print(
-                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, grad norm: {:.2e}, gpu usage: {:.3f}, peak gpu reserved: {:.3f}, peak gpu allocated: {:.3f}, time: {:6.1f} sec".format(
+                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, lrs: ({:.2e}, {:.2e}, {:.2e}), grad norm: {:.2e}, peak gpu reserved: {:.3f}, peak gpu allocated: {:.3f}, time: {:6.1f} sec".format(
                                         step,
                                         train_loss_list[-1],
                                         val_loss_list[-1],
+                                        optimizer.param_groups[0]['lr'],
+                                        optimizer.param_groups[1]['lr'],
+                                        optimizer.param_groups[2]['lr'],
                                         grad_norm,
-                                        gpu_memory_used,
                                         peak_gpu_memory_reserved,
                                         peak_gpu_memory_allocated,
                                         (toc - tic),
@@ -481,8 +507,10 @@ def train(
                             if old_pos is not None:
                                 old_pos2 = old_pos.detach().clone()
                                 old_conv2 = old_conv.detach().clone()
+                                old_temporal2 = old_temporal.detach().clone()
                             old_pos = pos.detach().clone()
                             old_conv = conv.detach().clone()
+                            old_temporal = temporal.detach().clone()
                             file_name = "cBottle-SR-{}.zip".format(step)
                             save_checkpoint(
                                 os.path.join(output_path, file_name),
@@ -494,6 +522,12 @@ def train(
                                 loss=train_loss_list,
                             )
                             running_loss = 0.0
+
+                if step == warmup_steps:
+                    for i, group in enumerate(optimizer.param_groups):
+                        if group.get("tag") == "base":
+                            group["lr"] = 4e-2
+                            scheduler.base_lrs[i] = 4e-2  # update scheduler reference
 
                 if step >= num_steps:
                     print("training finished!")
@@ -509,16 +543,19 @@ def parse_args():
         "--output-path", type=str, required=True, help="output directory"
     )
     parser.add_argument(
-        "--log-freq", type=int, default=100, help="Log every N steps (default: 100)"
+        "--log-freq", type=int, default=500, help="Log every N steps (default: 500)"
     )
     parser.add_argument(
         "--lr-level", type=int, default=6, help="HPX level of the low-resolution map"
     )
     parser.add_argument(
-        "--train-batch-size", type=int, default=1, help="training batch size per GPU"
+        "--train-batch-size", type=int, default=8, help="training batch size per GPU"
     )
     parser.add_argument(
-        "--test-batch-size", type=int, default=2, help="validation batch size per GPU"
+        "--test-batch-size", type=int, default=8, help="validation batch size per GPU"
+    )
+    parser.add_argument(
+        "--transfer-learning", action="store_true", help="Enable transfer learning from an image model"
     )
     return parser.parse_args()
 
@@ -532,4 +569,5 @@ if __name__ == "__main__":
         lr_level=args.lr_level,
         train_batch_size=args.train_batch_size,
         test_batch_size=args.test_batch_size,
+        transfer_learning=args.transfer_learning,
     )
