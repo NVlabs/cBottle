@@ -56,30 +56,33 @@ for line in files.split():
         continue
 
     with open(file) as f:
+        while True:
+            offset = f.tell()
+            line = f.readline()
+            if not line.startswith("#!"):
+                break
+
+        f.seek(0)
+        header = f.read(offset)
         buf = f.read(len(license_header))
         if buf != license_header:
-            failed.append(file)
+            f.seek(offset)
+            body = f.read()
+            failed.append((file, header, body))
 
 if failed:
     print("Missing license headers found for files:")
     print("----------------------------------------")
-    for file in failed:
+    for file, header, body in failed:
         if not args.fix:
             print(file)
             continue
 
         print(f"Fixing {file}")
-        with open(file, "r") as f:
-            text = ""
-            for line in f:
-                # strip incorrect SPDX lines
-                text += line
-
         with open(file, "w") as f:
-            f.write(license_header)
-            f.write("\n")
-            f.write(text)
+            f.write(header)
+            f.write(license_header + "\n")
+            f.write(body)
 
-    print()
     print("Run python ci/check_licenses.py --fix to fix the license headers")
     sys.exit(1)
