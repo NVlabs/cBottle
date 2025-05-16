@@ -115,9 +115,9 @@ DATASET_METADATA: dict[str, DatasetMetadata] = {
     ),
     "icon": DatasetMetadata(
         name="icon",
-        start="2020-01-20 03:00:00",
-        end="2025-07-22 00:00:00",
-        time_step=3,
+        start="2020-01-01 06:00:00",
+        end="2021-03-01 00:00:00",
+        time_step=6,
         time_unit=TimeUnit.HOUR,
     ),
     "amip": DatasetMetadata(
@@ -388,55 +388,38 @@ def _get_dataset_icon(
         ZarrLoader(
             path=config.V6_ICON_ZARR,
             storage_options=get_storage_options(config.V6_ICON_ZARR_PROFILE),
-            variables_3d=["T", "U", "V", "Z"],
-            variables_2d=["tcwv"],
-            level_coord_name="level",
-            # convert levels to Pa
-            levels=[lev * 100 for lev in LEVELS],
-        ),
-        ZarrLoader(
-            path=config.RAW_DATA_URL_6,
-            storage_options=get_storage_options(config.RAW_DATA_PROFILE),
             levels=[],
             variables_3d=[],
             variables_2d=[
-                "tas",
+                "ta",
                 "uas",
                 "vas",
-                "cllvi",
-                "clivi",
                 "rlut",
                 "rsut",
-                "pres_msl",
+                "orog",
                 "pr",
-                "rsds",
                 "ts",
-                "sic",
             ],
-        ),
-        ZarrLoader(
-            path=config.SST_MONMEAN_DATA_URL_6,
-            storage_options=get_storage_options(config.SST_MONMEAN_DATA_PROFILE),
-            levels=[],
-            variables_3d=[],
-            variables_2d=["ts_monmean"],
-            time_sel_method="nearest",
-        ),
+        )
     ]
 
-    train_times = valid_times[valid_times < "2024-03-06 15:00:00"]
-    test_times = valid_times[valid_times >= "2024-03-06 15:00:00"]
+    train_times = valid_times[valid_times < "2021-01-01 00:00:00"]
+    test_times = valid_times[valid_times >= "2021-01-01 00:00:00"]
     times = {"train": train_times, "test": test_times, "": valid_times}[split]
+
+    print(times)
 
     if times.size == 0:
         raise RuntimeError("No times are selected.")
 
     # open land data
     land_data = zarr.open_group(
-        config.LAND_DATA_URL_6,
-        storage_options=get_storage_options(config.LAND_DATA_PROFILE),
+        config.V6_ICON_ZARR,
+        storage_options=get_storage_options(config.V6_ICON_ZARR_PROFILE),
+        mode="r"
     )
-    land_fraction = land_data["land_fraction"][:]
+    land_fraction = land_data["sftlf"][:]
+    print("sftlf used for land mask!!")
 
     label = LABELS.index("icon")
 
