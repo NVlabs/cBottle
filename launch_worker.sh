@@ -25,6 +25,7 @@
 #SBATCH -o cBottle_training_2node_%j.out 
 #SBATCh -e cBottle_training_2node_%j.err
 
+source ~/cbottle-env/bin/activate
 
 set -a
 source scripts/nersc/env
