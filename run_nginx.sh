@@ -17,8 +17,13 @@
 # ls /opt/scripts
 # exit 1
 
-mkdir -p $SCRATCH/nginx
-shifter --image=nginx:stable --volume "$PWD/scripts:/opt/scripts;$SCRATCH/nginx:/nginx" bash -c '
-mkdir -p /nginx/cache/{client_temp,proxy_temp,fastcgi_temp,uwsgi_temp,scgi_temp}
-nginx -c /opt/scripts/nginx/xarray.conf -g "daemon off;"
-'
+if [ -f "scripts/nginx.pid" ]; then
+    echo "Nginx is already running"
+    shifter --image=nginx:stable --volume "$PWD/scripts:/opt/scripts;$SCRATCH/nginx:/nginx" bash -c 'nginx -c /opt/scripts/nginx/xarray.conf -s reload'
+else
+    mkdir -p $SCRATCH/nginx
+    shifter --image=nginx:stable --volume "$PWD/scripts:/opt/scripts;$SCRATCH/nginx:/nginx" bash -c '
+        mkdir -p /nginx/cache/{client_temp,proxy_temp,fastcgi_temp,uwsgi_temp,scgi_temp}
+        nginx -c /opt/scripts/nginx/xarray.conf -g "daemon off;" &
+    '
+fi

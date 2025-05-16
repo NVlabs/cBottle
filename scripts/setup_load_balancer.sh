@@ -59,9 +59,6 @@ shifter --image=consul:1.15 --volume $SCRATCH/consul_data:/consul/data \
 sleep 10
 # fill in template
 
-consul-template -once  -config scripts/consul-template/config.hcl 
-./run_nginx.sh &
-
 consul-template -config scripts/consul-template/config.hcl
 
 echo "Load balancer setup complete. Services are running."
