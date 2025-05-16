@@ -15,8 +15,7 @@
 # TODO figure out how to make it deterministic - setting the random seed doesn't work as expected
 import logging
 from dataclasses import dataclass
-from typing import Optional, List, Any
-import functools
+from typing import Optional, List
 import socket
 import consul
 import atexit
@@ -79,17 +78,23 @@ _dataset = None
 
 _counter = threading.Semaphore(2)
 
+
 @dask.delayed
 def run_inference(
     times: List[np.datetime64],
     config: InferenceConfig,
+    net,
+    dataset,
 ) -> xr.Dataset:
     with _counter:
-        return _run_inference(times, config)
+        return _run_inference(times, config, net, dataset)
+
 
 def _run_inference(
     times: List[np.datetime64],
     config: InferenceConfig,
+    net,
+    dataset,
 ) -> xr.Dataset:
     """Run inference for given timestamps
 
@@ -103,18 +108,6 @@ def _run_inference(
         xr.Dataset: Inference results
     """
     logging.info(f"Running inference for {len(times)} times")
-
-    # cache the model and dataset
-    global _model, _dataset
-    if _model is None:
-        _model = load_model(config.state_path)
-
-    if _dataset is None:
-        _dataset = get_dataset()
-
-    net = _model
-    dataset = _dataset
-
     device = next(net.parameters()).device
     batch_size = config.batch_size
 
@@ -216,6 +209,8 @@ class LazyHealpixInference:
                 run_inference(
                     times[i : i + self.config.batch_size],
                     config=self.config,
+                    net=self.net,
+                    dataset=self.dataset,
                 ),
                 shape=(
                     self.config.batch_size,
@@ -249,35 +244,6 @@ class LazyHealpixInference:
         )
 
         return ds
-
-
-def register_with_consul(host: str, port: int, service_name: str = "xarray"):
-    """Register the service with Consul"""
-    try:
-        c = consul.Consul("login18")
-        service_id = f"{service_name}-{host}-{port}"
-
-        # Get the actual IP address
-        actual_ip = socket.gethostbyname(host)
-
-        # Register the service
-        c.agent.service.register(
-            name=service_name,
-            service_id=service_id,
-            address=actual_ip,
-            port=port,
-            tags=["xarray", "inference"],
-            check=consul.Check.http(
-                f"http://{actual_ip}:{port}/health", interval="30s", timeout="10s"
-            ),
-        )
-
-        # Register cleanup on exit
-        atexit.register(lambda: c.agent.service.deregister(service_id))
-
-        logger.info(f"Registered service {service_name} with Consul")
-    except Exception as e:
-        logger.error(f"Failed to register with Consul: {e}")
 
 
 def main():
@@ -346,7 +312,31 @@ def main():
         return {"status": "healthy"}
 
     # Register with Consul
-    register_with_consul(args.host, args.port, args.service_name)
+    try:
+        c = consul.Consul(args.consul_host)
+        service_id = f"{args.service_name}-{args.host}-{args.port}"
+
+        # Get the actual IP address
+        actual_ip = socket.gethostbyname(args.host)
+
+        # Register the service
+        c.agent.service.register(
+            name=args.service_name,
+            service_id=service_id,
+            address=actual_ip,
+            port=args.port,
+            tags=["xarray", "inference"],
+            check=consul.Check.http(
+                f"http://{actual_ip}:{args.port}/health", interval="30s", timeout="10s"
+            ),
+        )
+
+        # Register cleanup on exit
+        atexit.register(lambda: c.agent.service.deregister(service_id))
+
+        logger.info(f"Registered service {args.service_name} with Consul")
+    except Exception as e:
+        logger.error(f"Failed to register with Consul: {e}")
 
     # Start server
     rest.serve(host=args.host, port=args.port)

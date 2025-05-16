@@ -18,6 +18,8 @@
 # then delete the consul_data directory, kill any lingering processes (ps aux | grep consul) and try again
 set -ex
 
+port="$1"
+
 # Create necessary directories
 mkdir -p $SCRATCH/consul_data
 mkdir -p $SCRATCH/nginx $SCRATCH/consul-template
@@ -44,6 +46,7 @@ cleanup() {
     pkill -f "consul"
     pkill -f "nginx"
     pkill -f "consul-template"
+    rm -f .load-balancer
 }
 
 
@@ -51,9 +54,10 @@ trap cleanup EXIT
 
 # Start Consul in Shifter
 MY_IP=$(hostname -I | awk '{print $1}')
-MY_IP=128.55.64.27 # from ping login18 in compute node
 shifter --image=consul:1.15 --volume $SCRATCH/consul_data:/consul/data \
-    consul agent -server -bootstrap-expect=1 -ui -bind=$MY_IP -advertise=$MY_IP -client 0.0.0.0 -data-dir=/consul/data &
+    consul agent -server -bootstrap-expect=1 -ui -http-port="$CONSUL_PORT" -bind=$MY_IP -advertise=$MY_IP -client 0.0.0.0 -data-dir=/consul/data &
+
+echo $MY_IP > .load-balancer
 
 # Wait for Consul to start
 sleep 10

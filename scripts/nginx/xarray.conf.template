@@ -16,7 +16,7 @@ http {
     }
 
     server {
-        listen 9999;
+        listen {{env "NGINX_PORT"}};
         server_name _;
 
         location / {

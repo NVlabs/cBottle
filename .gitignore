@@ -1,1 +1,5 @@
 site
+.bin
+.load-balancer
+scripts/nginx.pid
+scripts/nginx/xarray.conf
