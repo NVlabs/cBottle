@@ -12,23 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# TODO document this somewher
-# pip install python-consul
-
-state=/global/cfs/cdirs/trn006/data/nvidia/cBottle/cBottle-3d.zip
-
-python3 scripts/xarray_server.py \
-    --sigma-max 200 --bf16  \
-    --state-path "$state" \
-    --start-time 2000-01-01 \
-    --end-time 2001-12-31  \
-    --host $HOSTNAME \
-    --batch-size 4 \
-    --freq 3h
-
-# docker run  --rm --name nginx --net host \
-# -ti \
-# -v $PWD/nginx.conf:/etc/nginx/nginx.conf \
-# -v nginx_cache:/tmp/cache nginx
-
+#!/bin/bash
+mkdir -p $SCRATCH/nginx
+shifter --image=nginx:stable --volume "$PWD/scripts:/opt/scripts;$SCRATCH/nginx:/nginx" bash -c 'nginx -c /opt/scripts/nginx/xarray.conf -s reload'
