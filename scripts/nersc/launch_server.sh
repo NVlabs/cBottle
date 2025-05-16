@@ -13,9 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Load the environment variables in the nersc/env file
-set -a
-source scripts/nersc/env
-set +a
+# TODO document this somewher
+# pip install python-consul
 
-srun --nodes 1 --qos interactive --time 04:00:00 -C 'gpu&hbm80g' --gpus 4 --account=trn006  --pty /bin/bash
+state=/global/cfs/cdirs/trn006/data/nvidia/cBottle/cBottle-3d.zip
+
+python3 scripts/xarray_server.py \
+    --sigma-max 200 --bf16  \
+    --state-path "$state" \
+    --start-time 2000-01-01 \
+    --end-time 2001-12-31  \
+    --host $HOSTNAME \
+    --batch-size 4 \
+    --freq 3h
+
+# docker run  --rm --name nginx --net host \
+# -ti \
+# -v $PWD/nginx.conf:/etc/nginx/nginx.conf \
+# -v nginx_cache:/tmp/cache nginx
+

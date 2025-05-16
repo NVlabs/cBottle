@@ -146,6 +146,35 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
     def __len__(self):
         return len(self._times)
 
+    def sel_time(self, time):
+        return self.get(self.times.get_loc(time))
+
+    def get(self, idx):
+        # if idx < 0 or idx >= self.valid_length:
+        #     raise IndexError(
+        #         f"Index {idx} out of bounds for dataset of length {self.valid_length}"
+        #     )
+
+        frame_idxs = range(
+            idx, idx + self.time_length * self.frame_step, self.frame_step
+        )
+
+        window_times = self.times[list(frame_idxs)]
+        window_data = sync(_sel_time(self._loaders, window_times))
+
+        frames = []
+        timestamps = []
+        for i, time in enumerate(window_times):
+            arr_i = {k: v[i] for k, v in window_data.items()}
+            timestamp = pd.Timestamp(*cftime.to_tuple(time))
+
+            frames.append(arr_i)
+            timestamps.append(timestamp)
+
+        window_tensor = self.transform(timestamps, frames)
+
+        return window_tensor
+
     def _generator_shuffle(self, arr, worker_info=None):
         if self._generator is None:
             if worker_info:

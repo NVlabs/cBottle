@@ -1,3 +1,4 @@
+#!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -12,10 +13,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# shifter --image=nginx:stable --volume $PWD/scripts:/opt/scripts \
+# ls /opt/scripts
+# exit 1
 
-# Load the environment variables in the nersc/env file
-set -a
-source scripts/nersc/env
-set +a
-
-srun --nodes 1 --qos interactive --time 04:00:00 -C 'gpu&hbm80g' --gpus 4 --account=trn006  --pty /bin/bash
+if [ -f "scripts/nginx.pid" ]; then
+    echo "Nginx is already running"
+    shifter --image=nginx:stable --volume "$PWD/scripts:/opt/scripts;$SCRATCH/nginx:/nginx" bash -c 'nginx -c /opt/scripts/nginx/xarray.conf -s reload'
+else
+    mkdir -p $SCRATCH/nginx
+    shifter --image=nginx:stable --volume "$PWD/scripts:/opt/scripts;$SCRATCH/nginx:/nginx" bash -c '
+        mkdir -p /nginx/cache/{client_temp,proxy_temp,fastcgi_temp,uwsgi_temp,scgi_temp}
+        nginx -c /opt/scripts/nginx/xarray.conf -g "daemon off;" &
+    '
+fi
