@@ -174,8 +174,13 @@ def _run_inference(
                     sigma_max=int(config.sigma_max),
                 )
 
-        # Denormalize and convert to numpy
+        # Denormalize, reorder, and convert to numpy
         out = dataset.batch_info.denormalize(out)
+        out = earth2grid.healpix.reorder(
+            out,
+            earth2grid.healpix.HEALPIX_PAD_XY,
+            earth2grid.healpix.PixelOrder.NEST,
+        )
         results.append(out.cpu().float().numpy())
 
     # Combine results
@@ -225,21 +230,20 @@ class LazyHealpixInference:
 
         # Create dataset
         ds = xr.Dataset(
-            {"data": (["time", "channel", "pixel"], array)},
-            # coords={
-            #     "time": times,
-            #     "channel": self.dataset.batch_info.channels,
-            #     "pixel": np.arange(self.npix),
-            # }
+            {"data": (["time", "channel", "cell"], array)},
+            coords={
+                "time": times,
+                "channel": self.dataset.batch_info.channels,
+            },
         )
         # Add grid mapping
-        ds.attrs["grid_mapping"] = "healpix"
+        ds["data"].attrs["grid_mapping"] = "healpix"
         ds["healpix"] = xr.DataArray(
             data=np.array([2**self.config.hpx_level]),
             attrs={
                 "grid_mapping_name": "healpix",
                 "nside": 2**self.config.hpx_level,
-                "ordering": "ring",
+                "ordering": "nest",
             },
         )
 
