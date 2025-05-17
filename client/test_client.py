@@ -19,3 +19,4 @@ def test_client():
     ds = cbottle_client.open_zarr(
         "login33", "xarray", "datasets/inference/zarr", chunks=None
     )
+    assert ds is not None

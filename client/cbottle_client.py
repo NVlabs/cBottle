@@ -16,18 +16,13 @@ import aiohttp
 import asyncio
 from typing import Iterable, AsyncIterator, Literal
 from urllib.parse import urljoin
-import zarr.api.asynchronous
 import xarray
 import random
-import zarr.api.synchronous
 from zarr.core.buffer import default_buffer_prototype, Buffer, BufferPrototype
 from zarr.core.common import BytesLike
 from zarr.abc.store import (
     Store,
     ByteRequest,
-    RangeByteRequest,
-    OffsetByteRequest,
-    SuffixByteRequest,
 )
 
 
