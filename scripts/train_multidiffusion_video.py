@@ -325,7 +325,7 @@ def train(
         )
         training_sampler = samplers.InfiniteSequentialSampler(training_dataset)
         test_sampler = samplers.distributed_split(
-            samplers.subsample(test_dataset, min_samples=valid_min_samples)
+            samplers.subsample(test_dataset, min_samples=max(WORLD_RANK, valid_min_samples))
         )
     training_loader = torch.utils.data.DataLoader(
         training_dataset,
