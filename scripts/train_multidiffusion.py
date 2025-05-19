@@ -126,6 +126,7 @@ class Mockdataset(torch.utils.data.Dataset):
 def train(
     output_path: str,
     customized_dataset=None,
+    lr_level=6,
     train_batch_size=15,
     test_batch_size=30,
     valid_min_samples: int = 1,
@@ -197,9 +198,8 @@ def train(
         sampler=test_sampler,
         num_workers=0,
     )
-    # TODO use upscaling rate instead of hardcoded 6
     low_res_grid = earth2grid.healpix.Grid(
-        6, pixel_order=earth2grid.healpix.PixelOrder.NEST
+        lr_level, pixel_order=earth2grid.healpix.PixelOrder.NEST
     )
     lat = torch.linspace(-90, 90, 128)[:, None]
     lon = torch.linspace(0, 360, 128)[None, :]
@@ -218,6 +218,7 @@ def train(
         out_channels=out_channels,
     )
     img_resolution = model_config.img_resolution
+    model_config.level = training_dataset.grid.level
     net = cbottle.models.get_model(model_config)
     net.train().requires_grad_(True).cuda()
     net.cuda(LOCAL_RANK)
@@ -461,9 +462,25 @@ def parse_args():
     parser.add_argument(
         "--log-freq", type=int, default=100, help="Log every N steps (default: 100)"
     )
+    parser.add_argument(
+        "--lr-level", type=int, default=6, help="HPX level of the low-resolution map"
+    )
+    parser.add_argument(
+        "--train-batch-size", type=int, default=15, help="training batch size per GPU"
+    )
+    parser.add_argument(
+        "--test-batch-size", type=int, default=30, help="validation batch size per GPU"
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    train(output_path=args.output_path, num_steps=1e6, log_freq=args.log_freq)
+    train(
+        output_path=args.output_path,
+        num_steps=1e6,
+        log_freq=args.log_freq,
+        lr_level=args.lr_level,
+        train_batch_size=args.train_batch_size,
+        test_batch_size=args.test_batch_size,
+    )
