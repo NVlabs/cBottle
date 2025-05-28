@@ -137,6 +137,7 @@ def inference(arg_list=None, customized_dataset=None):
     else:
         test_dataset = HealpixDatasetV5(
             path=config.RAW_DATA_URL,
+            land_path=config.LAND_DATA_URL_10,
             train=False,
             yield_index=True,
             healpixpad_order=False,
