@@ -872,6 +872,10 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
             out = self.sst_ds.ts_monmean.interp(time=dtime).values
         return np.expand_dims(out, axis=0)
 
+    def get_timestamp_for_time_index(self, i: int) -> cftime.DatetimeProlepticGregorian:
+        time = self.get_time(i)
+        return cftime_to_timestamp(time)
+
     def __getitem__(self, i):
         raw = self.get_nest_map_for_time_index(self.time_index[i])
         raw = {k: torch.tensor(v) for k, v in raw.items()}
@@ -913,7 +917,7 @@ class HealpixDatasetV5(torch.utils.data.Dataset):
             "condition": cond,
             "second_of_day": raw["second_of_day"][None],
             "day_of_year": raw["day_of_year"][None],
-            "timestamp": cftime_to_timestamp(self.get_time(i)),
+            "timestamp": self.get_timestamp_for_time_index(self.time_index[i]),
         }
 
         if self.yield_index:
@@ -959,8 +963,14 @@ class NetCDFWrapperV1(torch.utils.data.Dataset):
         """
         self.yield_index = yield_index
         self._ds = ds
-        self.lr_level = int(np.log2(ds["crs"].healpix_nside))
-        if ds["crs"].healpix_order == "ring":
+
+        # fails if more than one crs_var detected
+        (crs_var,) = [
+            v for v in ds if ds[v].attrs.get("grid_mapping_name", "") == "healpix"
+        ]
+
+        self.lr_level = int(np.log2(ds[crs_var].healpix_nside))
+        if ds[crs_var].healpix_order == "ring":
             self.in_grid = earth2grid.healpix.Grid(
                 level=self.lr_level, pixel_order=earth2grid.healpix.PixelOrder.RING
             )
