@@ -133,7 +133,7 @@ def inference(arg_list=None, customized_dataset=None):
     elif input_path:
         ds = xr.open_dataset(input_path)
         test_dataset = NetCDFWrapperV1(ds, hpx_level=hpx_level, healpixpad_order=False)
-        tasks = None
+        tasks = np.r_[WORLD_RANK : len(test_dataset) : WORLD_SIZE]
     else:
         test_dataset = HealpixDatasetV5(
             path=config.RAW_DATA_URL,
@@ -190,7 +190,7 @@ def inference(arg_list=None, customized_dataset=None):
     else:
         print("Performing super-resolution over the entire globe")
 
-    for batch in tqdm.tqdm(loader):
+    for batch in tqdm.tqdm(loader, disable=WORLD_RANK != 0):
         target = batch["target"]
         target = target[0, :, 0]
         # normalize inputs
@@ -252,7 +252,11 @@ def inference(arg_list=None, customized_dataset=None):
         target = target.cpu() * test_dataset._scale + test_dataset._mean
 
         def prepare(x):
-            ring_order = high_res_grid.reorder(earth2grid.healpix.PixelOrder.RING, x)
+            ring_order = healpix.reorder(
+                x,
+                earth2grid.healpix.PixelOrder.NEST,
+                earth2grid.healpix.PixelOrder.RING,
+            )
             return {
                 test_dataset.batch_info.channels[c]: ring_order[:, c, None].cpu()
                 for c in range(x.shape[1])
