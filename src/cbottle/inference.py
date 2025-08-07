@@ -163,11 +163,12 @@ class CBottle3d:
         device = next(self.net.parameters()).device
         return device
 
-    def infill(self, batch: dict) -> tuple[torch.Tensor, Coords]:
+    def infill(self, batch: dict, seed: int | None = None) -> tuple[torch.Tensor, Coords]:
         """
         Perform infilling on batch with NaN values.
         Args:
             batch: Input batch containing data with NaN values
+            seed: If not none, fixes the random generators
 
         Returns:
             Tuple of ((original_data, infilled_data), coords)
@@ -201,8 +202,13 @@ class CBottle3d:
         tsteps = torch.unique_consecutive(torch.tensor(tsteps, device=images.device))
         tsteps = tsteps.flip(0)
         dt = torch.diff(tsteps).float()
+
+        rng = torch.Generator()
+        if seed:
+            rng.manual_seed(seed)
+ 
         dW = torch.randn(
-            [len(dt), *images.shape], dtype=images.dtype, device=images.device
+            [len(dt), *images.shape], generator=rng, dtype=images.dtype, device=images.device
         ) * dt.view(-1, 1, 1, 1, 1)
         W = torch.cumsum(dW, dim=0)
         y = images + W
@@ -227,7 +233,7 @@ class CBottle3d:
         D.sigma_min = self.net.sigma_min
 
         # Generate random latents
-        latents = torch.randn_like(images) * self.sigma_max
+        latents = torch.randn_like(images, generator=rng) * self.sigma_max
 
         # Run infilling sampling
         with torch.no_grad():
