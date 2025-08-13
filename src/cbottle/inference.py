@@ -134,12 +134,13 @@ class CBottle3d:
             # Fallback: try to get grid from domain directly
             grid_obj = self.net.domain
 
-        scales = info.scales
-        center = info.center
-        x = grid_obj.reorder(self.output_grid.pixel_order, x)
-        x = torch.tensor(scales)[:, None, None].to(x) * x + torch.tensor(center)[
-            :, None, None
-        ].to(x)
+        if info.scales is not None and info.center is not None:
+            scales = info.scales
+            center = info.center
+            x = grid_obj.reorder(self.output_grid.pixel_order, x)
+            x = torch.tensor(scales)[:, None, None].to(x) * x + torch.tensor(center)[
+                :, None, None
+            ].to(x)
         return x
 
     def _move_to_device(self, batch: dict) -> dict:
@@ -385,6 +386,10 @@ class CBottle3d:
         masked_vars = ["rlut", "rsut", "rsds"]
         return torch.tensor([c not in masked_vars for c in self.batch_info.channels])
 
+    @property
+    def time_length(self):
+        return self.net.time_length
+
     def sample(
         self,
         batch,
@@ -395,41 +400,38 @@ class CBottle3d:
         bf16=True,
     ):
         """
-
         Args:
 
-            guidance_pixels: pixels of ``self.input_grid``` where the TCs are desired. 0<= guidance_pixels < 12 * nside ^2.
+            guidance_pixels: Either the pixel index of ``self.input_grid``` where the
+                TCs are desired. 0<= guidance_pixels < 12 * nside ^2. Or the enitre HPX
+                tensor already set. If None, no guidance used.
             guidance_scale: float = 0.03,
 
         """
-        batch = self._move_to_device(batch)
         images, labels, condition = batch["target"], batch["labels"], batch["condition"]
-        second_of_day = batch["second_of_day"].cuda().float()
-        day_of_year = batch["day_of_year"].cuda().float()
+        second_of_day = batch["second_of_day"].float()
+        day_of_year = batch["day_of_year"].float()
         batch_size = second_of_day.shape[0]
 
         label_ind = labels.nonzero()[:, 1]
-        mask = torch.stack([self.icon_mask, self.era5_mask]).cuda()[label_ind]  # n, c
+        mask = torch.stack([self.icon_mask, self.era5_mask]).to(self.device)[label_ind]  # n, c
         mask = mask[:, :, None, None]
 
         with torch.no_grad():
-            device = condition.device
-
             if seed is None:
                 rnd = torch
             else:
-                rnd = StackedRandomGenerator(device, seeds=[seed] * batch_size)
+                rnd = StackedRandomGenerator(self.device, seeds=[seed] * batch_size)
 
             latents = rnd.randn(
                 (
                     batch_size,
                     self.net.img_channels,
-                    self.net.time_length,
+                    self.time_length,
                     self.net.domain.numel(),
                 ),
-                device=device,
+                device=self.device,
             )
-
             if start_from_noisy_image:
                 xT = latents * self.sigma_max + images
             else:
@@ -441,15 +443,14 @@ class CBottle3d:
             labels_when_nan = torch.zeros_like(labels)
             labels_when_nan[:, 0] = 1
 
-            if guidance_pixels is not None:
+            guidance_data = guidance_pixels
+            if not guidance_pixels is None and guidance_pixels.ndim == 1:
                 guidance_data = torch.full(
                     (batch_size, 1, 1, *self.classifier_grid.shape),
                     torch.nan,
-                    device=device,
+                    device=self.device,
                 )
                 guidance_data[:, :, :, guidance_pixels] = 1
-            else:
-                guidance_data = None
 
             def D(x_hat, t_hat):
                 if guidance_data is not None:
@@ -475,11 +476,11 @@ class CBottle3d:
                     ).out
                 else:
                     d2 = 0.0
-
+                
                 d = out.out.where(mask, d2)
-
                 if guidance_data is not None and guidance_scale > 0:
                     if self.separate_classifier is not None:
+
                         out.logits = self.separate_classifier(
                             x_hat,
                             t_hat,
@@ -518,6 +519,8 @@ class CBottle3d:
                     sigma_max=int(
                         self.sigma_max
                     ),  # Convert to int for type compatibility
+                    sigma_min=self.sigma_min,
+                    num_steps=self.num_steps,
                 )
             return self._post_process(out), self.coords
 
@@ -854,27 +857,18 @@ def load(model: str, root="") -> CBottle3d:
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
             ","
         )
-        rundir = "v6data-mChan192"
+        rundir = "cBottle-3d"
         paths = [os.path.join(root, rundir, c) for c in checkpoints]
         return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
-    elif model == "cbottle-3d":
-        path = os.path.join(
-            root, "v6data-mChan192", "training-state-009856000.checkpoint"
-        )
-        return CBottle3d.from_pretrained(path)
-    elif model == "cbottle-3d-tc":
-        path = os.path.join(
-            root,
-            "test_classifier_after_main_merge2",
-            "training-state-010240000.checkpoint",
-        )
-        return CBottle3d.from_pretrained(path)
     elif model == "cbottle-3d-moe-tc":
+        rundir = "cBottle-3d"
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
             ","
         )
-        paths = [os.path.join(root, c) for c in checkpoints]
-        classifier_path = os.path.join(root, "training-state-002176000.checkpoint")
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        classifier_path = os.path.join(
+            root, "cBottle-3d-tc", "training-state-002176000.checkpoint"
+        )
         return CBottle3d.from_pretrained(
             paths,
             sigma_thresholds=(100.0, 10.0),
