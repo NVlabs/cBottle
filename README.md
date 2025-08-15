@@ -76,11 +76,8 @@ To create netcdf files of the generations (and optionally the corresponding grou
 torchrun --nproc-per-node 8 scripts/inference_coarse_video.py \
     /path/to/your/model.checkpoint \
     --output_path /output/path \
-    --sample.save_mode all \
-    --sample.frame_selection_strategy unconditional \
-    --sample.denoiser_type standard \
-    --sample.sigma_max 0.02 \
-    --sample.sigma_max 1000
+    --sample.frame_selection_strategy unconditional
+
 ```
 
 ## Super-resolution model (cBottle-SR)

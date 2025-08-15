@@ -398,6 +398,10 @@ class CBottle3d:
         masked_vars = ["rlut", "rsut", "rsds"]
         return torch.tensor([c not in masked_vars for c in self.batch_info.channels])
 
+    @property
+    def time_length(self):
+        return self.net.time_length
+
     def sample(
         self,
         batch,
@@ -437,7 +441,7 @@ class CBottle3d:
                 (
                     batch_size,
                     self.net.img_channels,
-                    self.net.time_length,
+                    self.time_length,
                     self.net.domain.numel(),
                 ),
                 device=device,
@@ -528,6 +532,7 @@ class CBottle3d:
                     D,
                     xT,
                     randn_like=torch.randn_like,
+                    sigma_min=self.sigma_min,
                     sigma_max=int(
                         self.sigma_max
                     ),  # Convert to int for type compatibility
