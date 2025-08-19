@@ -109,7 +109,7 @@ class CBottle3d:
         if separate_classifier_path is not None:
             logging.info(f"Opening additional classifier at {separate_classifier_path}")
             with checkpointing.Checkpoint(separate_classifier_path) as c:
-                separate_classifier = c.read_model().cuda().eval()
+                separate_classifier = c.read_model().eval()
 
         return cls(net, separate_classifier=separate_classifier, **kwargs)
 
@@ -825,7 +825,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         for path in paths:
             logging.info(f"Opening {path}")
             with checkpointing.Checkpoint(path) as c:
-                model = c.read_model().cuda().eval()
+                model = c.read_model().eval()
                 experts.append(model)
                 batch_info = c.read_batch_info()
         return cls(experts, sigma_thresholds=sigma_thresholds, batch_info=batch_info)
