@@ -34,6 +34,7 @@ from .diffusion_samplers import (
     edm_sampler,
     edm_sampler_from_sigma,
     edm_sampler_steps,
+    few_step_sampler,
     StackedRandomGenerator,
 )
 from .datasets import base
@@ -614,7 +615,11 @@ class SuperResolutionModel:
         return cls(net, batch_info, **kwargs)
 
     def __call__(
-        self, x: torch.Tensor, coords: Coords, extents: tuple
+        self,
+        x: torch.Tensor,
+        coords: Coords,
+        extents: tuple,
+        distill_inference: bool,
     ) -> tuple[torch.Tensor, Coords]:
         """
         Perform super-resolution on a low-resolution tensor with batch processing.
@@ -672,7 +677,7 @@ class SuperResolutionModel:
 
                 # Apply super-resolution to single time step
                 hr_tensor = self._super_resolve_single_tensor(
-                    lr_tensor, inbox_patch_index
+                    lr_tensor, inbox_patch_index, distill_inference
                 )
                 time_results.append(hr_tensor)
 
@@ -708,7 +713,10 @@ class SuperResolutionModel:
         return x
 
     def _super_resolve_single_tensor(
-        self, lr_tensor: torch.Tensor, inbox_patch_index: torch.Tensor
+        self,
+        lr_tensor: torch.Tensor,
+        inbox_patch_index: torch.Tensor,
+        distill_inference: bool,
     ) -> torch.Tensor:
         """
         Perform super-resolution on a single low-resolution tensor.
@@ -787,12 +795,20 @@ class SuperResolutionModel:
             denoiser.round_sigma = self.net.round_sigma
 
             # Run EDM sampler
-            pred = edm_sampler(
-                denoiser,
-                latents,
-                num_steps=self.num_steps,
-                sigma_max=self.sigma_max,
-            )
+            if distill_inference:
+                pred = few_step_sampler(
+                    denoiser,
+                    latents,
+                    sigma_max=self.sigma_max,
+                    sigma_mid=[self.sigma_max / 80 * 1.5],
+                )
+            else:
+                pred = edm_sampler(
+                    denoiser,
+                    latents,
+                    num_steps=self.num_steps,
+                    sigma_max=self.sigma_max,
+                )
             pred = self.denormalize(pred)
             # Reshape back to original format
             pred = pred.reshape((in_channels, -1))
