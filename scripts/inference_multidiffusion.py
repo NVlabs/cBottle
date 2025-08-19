@@ -90,6 +90,11 @@ def inference(arg_list=None, customized_dataset=None):
         "--save-data", action="store_true", help="Save target data without inference"
     )
     parser.add_argument(
+        "--distill-inference",
+        action="store_true",
+        help="Inference with distilled model",
+    )
+    parser.add_argument(
         "--super-resolution-box",
         type=int,
         nargs=4,
@@ -103,6 +108,7 @@ def inference(arg_list=None, customized_dataset=None):
     state_path = args.state_path
     output_path = args.output_path
     plot_sample = args.plot_sample
+    distill_inference = args.distill_inference
     hpx_level = args.level
     min_samples = args.min_samples
     box = tuple(args.super_resolution_box) if args.super_resolution_box else None
@@ -197,7 +203,9 @@ def inference(arg_list=None, customized_dataset=None):
         if args.save_data:
             pred = target[None, :, None]
         else:
-            pred, _ = model(inp, coords=coords, extents=box)
+            pred, _ = model(
+                inp, coords=coords, extents=box, distill_inference=distill_inference
+            )
 
         target = target[None, :, None]
 
