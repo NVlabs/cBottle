@@ -208,6 +208,7 @@ def inference(arg_list=None, customized_dataset=None):
             )
 
         target = target[None, :, None]
+        lr = lr[None, :, None]
 
         def prepare(x):
             ring_order = healpix.reorder(
