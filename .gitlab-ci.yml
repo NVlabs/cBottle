@@ -72,7 +72,8 @@ cache:
 #     - gpu
 
 before_script:
-  - ci/setup_rclone.py
+  - mkdir -p ~/.config/rclone
+  - base64 -d $rclone > ~/.config/rclone/rclone.conf
   
 test:
   script:
