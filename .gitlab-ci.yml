@@ -73,7 +73,7 @@ cache:
 
 before_script:
   - mkdir -p ~/.config/rclone
-  - base64 -d $rclone > ~/.config/rclone/rclone.conf
+  - echo $rclone | base64 -d > ~/.config/rclone/rclone.conf
   
 test:
   script:
