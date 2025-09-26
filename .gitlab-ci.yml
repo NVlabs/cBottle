@@ -95,8 +95,9 @@ test:
     - PIP_CONSTRAINT="" make install-linters
     - make lint
     - python3 -m pip install earth2studio==0.8.1 pytest-regtest
+    - pip install -e .
     - make pytest
-    - pytest cbottle/tests/integration -k 'not train_uncond'
+    - pytest tests/integration -k 'not train_uncond'
     # TODO fix the scripts tests
     # - pytest third_party/cbottle/tests/scripts
   tags:
