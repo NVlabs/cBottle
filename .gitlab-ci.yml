@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a template, and might need editing before it works on your project.
+# To contribute improvements to CI/CD templates, please follow the Development guide at:
+# https://docs.gitlab.com/ee/development/cicd/templates.html
+# This specific template is located at:
+# https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/ci/templates/Python.gitlab-ci.yml
+
+# Official language image. Look for the different tagged releases at:
+# https://hub.docker.com/r/library/python/tags/
+image: gitlab-master.nvidia.com:5005/nbrenowitz/edm-chaos:latest
+
+# Change pip's cache directory to be inside the project directory since we can
+# only cache local items.
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  UV_VERSION: 0.5
+  PYTHON_VERSION: 3.12
+  BASE_LAYER: bookworm-slim
+  # GitLab CI creates a separate mountpoint for the build directory,
+  # so we need to copy instead of using hard links.
+  UV_LINK_MODE: copy
+  UV_CACHE_DIR: .uv-cache
+  CC: gcc
+  CXX: g++
+
+  # data configs
+  # full res icon data
+  RAW_DATA_URL: "s3://ICON_cycle3_ngc3028/ngc3028_PT30M_10.zarr/"
+  RAW_DATA_URL_6: "s3://ICON_cycle3_ngc3028/ngc3028_PT30M_6.zarr/"
+  RAW_DATA_PROFILE: pbss
+
+  # ICON Land data
+  LAND_DATA_URL_10: s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_10.zarr/
+  LAND_DATA_URL_6: s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_6.zarr/
+  LAND_DATA_PROFILE: pbss
+
+  # ICON coarse
+  SST_MONMEAN_DATA_URL_6: s3://asubramaniam-testing/ngc3028_P1D_ts_monmean_6.zarr
+  SST_MONMEAN_DATA_PROFILE: pbss
+  V6_ICON_ZARR: s3://nbrenowitz-scratch/ICON_v6_dataset.zarr/
+  V6_ICON_ZARR_PROFILE: pbss
+
+  # era5
+  V6_ERA5_ZARR: s3://ERA5_hpx_zarrs/era5_hpx_6.zarr
+  V6_ERA5_ZARR_PROFILE: pdx
+
+  AMIP_MID_MONTH_SST: s3://input4MIPs/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc
+  AMIP_MID_MONTH_SST_PROFILE: pbss
+
+
+# https://pip.pypa.io/en/stable/topics/caching/
+cache:
+  - key:
+      files:
+        - uv.lock
+    paths:
+      - $UV_CACHE_DIR
+  - paths:
+      - .cache/pip
+      - .mypy_cache
+      - .cache/cbottle
+# uv:
+#   image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+#   before_script:
+#     - apt-get update && apt-get install -y curl make git
+#     - curl -LsSf https://astral.sh/uv/install.sh | sh
+#     - export PATH="$HOME/.local/bin:$PATH"
+#     - uv --version
+#     - ./scripts/bootstrap_uv.sh
+#   script:
+#     - make pytest
+#   tags:
+#     - gpu
+
+before_script:
+  - mkdir -p ~/.config/rclone
+  - echo $rclone | base64 -d > ~/.config/rclone/rclone.conf
+  
+test:
+  script:
+    - python -m pip install mypy==1.9.0
+    - PIP_CONSTRAINT="" make install-linters
+    - make lint
+    - python3 -m pip install earth2studio==0.8.1 pytest-regtest
+    - pip install -e .
+    - make pytest
+    - pytest tests/integration -k 'not train_uncond'
+    # TODO fix the scripts tests
+    # - pytest third_party/cbottle/tests/scripts
+  tags:
+    - gpu
+
+
+# pages:
+#   script:
+#     - pip install sphinx sphinx-rtd-theme
+#     - cd doc
+#     - make html
+#     - mv build/html/ ../public/
+#   artifacts:
+#     paths:
+#       - public
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# deploy:
+#   stage: deploy
+#   script: echo "Define your deployment script!"
+#   environment: production
