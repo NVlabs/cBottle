@@ -19,15 +19,19 @@ from cbottle.datasets.dataset_3d import get_dataset
 import earth2grid
 import os
 import sys
+import warnings
 import numpy as np
 import pandas as pd
 
-times = pd.date_range(start="2018-09-01T00:00:00", end="2018-09-01T10:00:00", freq="1h")
+warnings.filterwarnings("ignore", message="Cannot do a zero-copy NCHW to NHWC")
+
+times = pd.date_range(start="2018-09-01T16:00:00", end="2018-09-01T16:00:00", freq="1h")
 lons = [-80, -53.25, -119.26]
 lats = [25, 21.77, 22.97]
 # lons = [-30, -30., -119.26]
 # lats = [0, 65, 0]
 output_path = sys.argv[1]
+translate = sys.argv[2] == "translate"
 
 ds = get_dataset(dataset="amip")
 ds.set_times(times)
@@ -37,7 +41,16 @@ model = cbottle.inference.load(
     "cbottle-3d-moe-tc",
 )
 indices_where_tc = model.get_guidance_pixels(lons, lats)
-out, coords = model.sample(batch, guidance_pixels=indices_where_tc)
+out, coords = model.sample(
+    batch,
+    guidance_pixels=indices_where_tc,
+)
+
+if translate:
+    out = model.normalize_and_reorder(out)
+    batch["target"] = out
+    out, coords = model.translate(batch, dataset="icon")
+
 writer = cbottle.netcdf_writer.NetCDFWriter(
     output_path,
     config=cbottle.netcdf_writer.NetCDFConfig(hpx_level=coords.grid.level),

@@ -308,7 +308,7 @@ class CBottle3d:
     ) -> dict:
         batch = self._move_to_device(batch)
 
-        images = batch["target"]
+        images = batch["encoded"]
         condition = batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
@@ -384,6 +384,23 @@ class CBottle3d:
         out = self._post_process(out)
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
+
+    def normalize_and_reorder(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by reordering to HPXPAD convention and normalizing.
+        """
+        info = self.batch_info
+        grid_obj = getattr(self.net.domain, "_grid", None)
+        if grid_obj is None:
+            # Fallback: try to get grid from domain directly
+            grid_obj = self.net.domain
+        scales = info.scales
+        center = info.center
+        x = self.output_grid.reorder(grid_obj.pixel_order, x)
+        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
+            :, None, None
+        ].to(x)
+        return x
 
     @property
     def coords(self) -> Coords:
