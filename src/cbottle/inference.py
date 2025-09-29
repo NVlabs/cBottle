@@ -614,12 +614,16 @@ class SuperResolutionModel:
             batch_info = checkpoint.read_batch_info()
         return cls(net, batch_info, **kwargs)
 
+    def _sample(self, denoiser, latents):
+        return edm_sampler(
+            denoiser, latents, num_steps=self.num_steps, sigma_max=self.sigma_max
+        )
+
     def __call__(
         self,
         x: torch.Tensor,
         coords: Coords,
         extents: tuple,
-        distill_inference: bool,
     ) -> tuple[torch.Tensor, Coords]:
         """
         Perform super-resolution on a low-resolution tensor with batch processing.
@@ -677,7 +681,7 @@ class SuperResolutionModel:
 
                 # Apply super-resolution to single time step
                 hr_tensor = self._super_resolve_single_tensor(
-                    lr_tensor, inbox_patch_index, distill_inference
+                    lr_tensor, inbox_patch_index
                 )
                 time_results.append(hr_tensor)
 
@@ -716,7 +720,6 @@ class SuperResolutionModel:
         self,
         lr_tensor: torch.Tensor,
         inbox_patch_index: torch.Tensor,
-        distill_inference: bool,
     ) -> torch.Tensor:
         """
         Perform super-resolution on a single low-resolution tensor.
@@ -795,24 +798,22 @@ class SuperResolutionModel:
             denoiser.round_sigma = self.net.round_sigma
 
             # Run EDM sampler
-            if distill_inference:
-                pred = few_step_sampler(
-                    denoiser,
-                    latents,
-                    sigma_max=self.sigma_max,
-                    sigma_mid=[self.sigma_max / 80 * 1.5],
-                )
-            else:
-                pred = edm_sampler(
-                    denoiser,
-                    latents,
-                    num_steps=self.num_steps,
-                    sigma_max=self.sigma_max,
-                )
+            pred = self._sample(denoiser, latents)
+
             pred = self.denormalize(pred)
             # Reshape back to original format
             pred = pred.reshape((in_channels, -1))
             return pred
+
+
+class DistilledSuperResolutionModel(SuperResolutionModel):
+    def _sample(self, denoiser, latents):
+        return few_step_sampler(
+            denoiser,
+            latents,
+            sigma_max=self.sigma_max,
+            sigma_mid=[self.sigma_max / 80 * 1.5],
+        )
 
 
 class MixtureOfExpertsDenoiser(torch.nn.Module):

@@ -24,7 +24,11 @@ from cbottle.datasets import samplers
 from cbottle.datasets.dataset_2d import HealpixDatasetV5, NetCDFWrapperV1
 from cbottle.netcdf_writer import NetCDFConfig, NetCDFWriter
 from earth2grid import healpix
-from cbottle.inference import SuperResolutionModel, Coords
+from cbottle.inference import (
+    SuperResolutionModel,
+    DistilledSuperResolutionModel,
+    Coords,
+)
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import argparse
@@ -167,15 +171,26 @@ def inference(arg_list=None, customized_dataset=None):
         output_path, nc_config, test_dataset.batch_info.channels, rank=WORLD_RANK
     )
 
-    model = SuperResolutionModel.from_pretrained(
-        state_path,
-        hpx_lr_level=args.level_lr,
-        patch_size=args.patch_size,
-        overlap_size=args.overlap_size,
-        num_steps=args.num_steps,
-        sigma_max=args.sigma_max,
-        device=device,
-    )
+    if distill_inference:
+        model = DistilledSuperResolutionModel.from_pretrained(
+            state_path,
+            hpx_lr_level=args.level_lr,
+            patch_size=args.patch_size,
+            overlap_size=args.overlap_size,
+            num_steps=args.num_steps,
+            sigma_max=args.sigma_max,
+            device=device,
+        )
+    else:
+        model = SuperResolutionModel.from_pretrained(
+            state_path,
+            hpx_lr_level=args.level_lr,
+            patch_size=args.patch_size,
+            overlap_size=args.overlap_size,
+            num_steps=args.num_steps,
+            sigma_max=args.sigma_max,
+            device=device,
+        )
 
     high_res_level = model.high_res_grid.level
     low_res_level = model.low_res_grid.level
@@ -203,9 +218,7 @@ def inference(arg_list=None, customized_dataset=None):
         if args.save_data:
             pred = target[None, :, None]
         else:
-            pred, _ = model(
-                inp, coords=coords, extents=box, distill_inference=distill_inference
-            )
+            pred, _ = model(inp, coords=coords, extents=box)
 
         target = target[None, :, None]
         lr = lr[None, :, None]

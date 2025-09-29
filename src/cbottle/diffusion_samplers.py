@@ -17,7 +17,7 @@
 
 import numpy as np
 import torch
-from typing import List
+from typing import List, Optional
 
 
 def edm_sampler_steps(
@@ -173,9 +173,9 @@ def edm_sampler_from_sigma(
 def few_step_sampler(
     net,
     latents,
-    sigma_min=0.002,
-    sigma_max=80,
-    sigma_mid: List[float] = None,
+    sigma_min: float = 0.002,
+    sigma_max: float = 80.0,
+    sigma_mid: Optional[List[float]] = None,
 ):
 
     # Adjust noise levels based on what's supported by the network.
