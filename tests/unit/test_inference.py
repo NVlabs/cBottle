@@ -159,7 +159,7 @@ def test_distilled_super_resolution_model_call():
     extents = (0, 5, 0, 5)
     coords = Coords(model.batch_info, model.low_res_grid)
     output, hr_coords = model(low_res_tensor, coords, extents)
-    assert output is not None
+    assert output is not None and output.shape == (1, 3, 1, 12 * 1024**2)
     assert hr_coords is not None
 
 
