@@ -45,9 +45,9 @@ out, coords = model.sample(
     batch,
     guidance_pixels=indices_where_tc,
 )
-batch['target'] = out
 
 if translate:
+    batch['target'] = out
     out, coords = model.translate(batch, dataset="icon")
 
 writer = cbottle.netcdf_writer.NetCDFWriter(
