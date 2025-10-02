@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import tempfile
 import torch
-from earth2grid.healpix import HEALPIX_PAD_XY, Grid
+from earth2grid.healpix import HEALPIX_PAD_XY, Grid, PaddingBackends
 
 import cbottle.datasets.healpix_artificial
 import cbottle.models.networks
@@ -203,6 +203,7 @@ def test_SongUnetCalendarEmbeddings():
         model_channels=4,
         calendar_embed_channels=1,
         mixing_type="healpix",
+        padding_backend=PaddingBackends.cuda,
     )
     device = "cuda"
     net.to(device).to(memory_format=torch.channels_last)
@@ -270,9 +271,7 @@ def test_song_unet_unused_params(enable_classifier: bool, device=torch.device("c
         assert param.grad is not None
 
 
-@pytest.mark.skipif(
-    not cbottle.models.networks._is_apex_available, reason="Apex unavailable"
-)
+@pytest.mark.skipif(not cbottle.models._is_apex_available, reason="Apex unavailable")
 def test_group_norm_apex_checkpoint_compatibility(device=torch.device("cuda")):
     gn1 = cbottle.models.networks.group_norm_factory(
         num_channels=128,

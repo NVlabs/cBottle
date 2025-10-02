@@ -60,7 +60,9 @@ class Checkpoint:
         with self._zip.open("net_state.pth", "w", force_zip64=True) as f:
             torch.save(net.state_dict(), f)
 
-    def read_model(self, net=None, map_location=None) -> torch.nn.Module:
+    def read_model(
+        self, net=None, map_location=None, **model_kwargs
+    ) -> torch.nn.Module:
         """Read the model from the checkpoint
 
         Args:
@@ -80,7 +82,7 @@ class Checkpoint:
 
         model_config = self.read_model_config()
         if net is None:
-            net = cbottle.models.get_model(model_config)
+            net = cbottle.models.get_model(model_config, **model_kwargs)
 
         with self._zip.open("net_state.pth", "r") as f:
             net.load_state_dict(

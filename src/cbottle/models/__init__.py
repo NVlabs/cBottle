@@ -12,13 +12,38 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import torch
 
 from cbottle.models import networks
 from cbottle.config.models import ModelConfigV1
+from earth2grid.healpix import PaddingBackends
+
+# Import apex GroupNorm if installed only
+_is_apex_available = False
+if torch.cuda.is_available():
+    try:
+        apex_gn_module = importlib.import_module("apex.contrib.group_norm")
+        ApexGroupNorm = getattr(apex_gn_module, "GroupNorm")
+        _is_apex_available = True
+    except ImportError:
+        pass
 
 
-def get_model(config: ModelConfigV1) -> torch.nn.Module:
+def get_model(
+    config: ModelConfigV1,
+    *,
+    allow_second_order_derivatives: bool = False,
+) -> torch.nn.Module:
+    if allow_second_order_derivatives:
+        use_apex_groupnorm = False
+        padding_backend = PaddingBackends.indexing
+        in_place_operations = False
+    else:
+        use_apex_groupnorm = True if _is_apex_available else False
+        padding_backend = PaddingBackends.cuda
+        in_place_operations = True
+
     if config.architecture == "unet_hpx64":
         precond_cls = networks.EDMPrecond
         if config.time_length > 1:
@@ -31,6 +56,9 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
                 time_length=config.time_length,
                 label_dropout=config.label_dropout,
                 calendar_include_legacy_bug=config.calendar_include_legacy_bug,
+                use_apex_groupnorm=use_apex_groupnorm,
+                padding_backend=padding_backend,
+                in_place_operations=in_place_operations,
             )
         else:
             architecture = networks.SongUNetHPX64(
@@ -41,6 +69,9 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
                 model_channels=config.model_channels,
                 calendar_include_legacy_bug=config.calendar_include_legacy_bug,
                 enable_classifier=config.enable_classifier,
+                use_apex_groupnorm=use_apex_groupnorm,
+                padding_backend=padding_backend,
+                in_place_operations=in_place_operations,
             )
 
     elif config.architecture == "unet_hpx1024_patch":
@@ -55,6 +86,9 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
             pos_embed_channels=config.position_embed_channels,
             label_dim=config.label_dim,
             level=config.level,
+            use_apex_groupnorm=use_apex_groupnorm,
+            padding_backend=padding_backend,
+            in_place_operations=in_place_operations,
         )
     else:
         raise NotImplementedError(config.architecture)

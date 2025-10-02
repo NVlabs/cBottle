@@ -37,6 +37,7 @@ from .diffusion_samplers import (
     StackedRandomGenerator,
 )
 from .datasets import base
+
 from .datasets.dataset_2d import HealpixDatasetV5, LABELS
 from cbottle.config import environment
 
@@ -101,15 +102,26 @@ class CBottle3d:
         path: str | list[str],
         separate_classifier_path: str | None = None,
         sigma_thresholds: tuple[float, ...] = (),
+        allow_second_order_derivatives: bool = False,
         **kwargs,
     ) -> "CBottle3d":
-        net = MixtureOfExpertsDenoiser.from_pretrained(path, sigma_thresholds)
+        net = MixtureOfExpertsDenoiser.from_pretrained(
+            path,
+            sigma_thresholds,
+            allow_second_order_derivatives=allow_second_order_derivatives,
+        )
 
         separate_classifier = None
         if separate_classifier_path is not None:
             logging.info(f"Opening additional classifier at {separate_classifier_path}")
             with checkpointing.Checkpoint(separate_classifier_path) as c:
-                separate_classifier = c.read_model().eval()
+                separate_classifier = (
+                    c.read_model(
+                        map_location=None,
+                        allow_second_order_derivatives=allow_second_order_derivatives,
+                    )
+                    .eval()
+                )
 
         return cls(net, separate_classifier=separate_classifier, **kwargs)
 
@@ -296,7 +308,7 @@ class CBottle3d:
     ) -> dict:
         batch = self._move_to_device(batch)
 
-        images = batch["target"]
+        images = batch["encoded"]
         condition = batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
@@ -372,6 +384,23 @@ class CBottle3d:
         out = self._post_process(out)
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
+
+    def normalize_and_reorder(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by reordering to HPXPAD convention and normalizing.
+        """
+        info = self.batch_info
+        grid_obj = getattr(self.net.domain, "_grid", None)
+        if grid_obj is None:
+            # Fallback: try to get grid from domain directly
+            grid_obj = self.net.domain
+        scales = info.scales
+        center = info.center
+        x = self.output_grid.reorder(grid_obj.pixel_order, x)
+        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
+            :, None, None
+        ].to(x)
+        return x
 
     @property
     def coords(self) -> Coords:
@@ -522,7 +551,10 @@ class CBottle3d:
                     sigma_min=self.sigma_min,
                     num_steps=self.num_steps,
                 )
-            return self._post_process(out), self.coords
+
+            out = self._post_process(out)
+
+            return out, self.coords
 
     def get_guidance_pixels(self, lons, lats) -> torch.Tensor:
         return self.classifier_grid.ang2pix(
@@ -811,7 +843,11 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
 
     @classmethod
     def from_pretrained(
-        cls, path: str | list[str], sigma_thresholds: tuple[float, ...]
+        cls,
+        path: str | list[str],
+        sigma_thresholds: tuple[float, ...],
+        *,
+        allow_second_order_derivatives: bool = False,
     ) -> "MixtureOfExpertsDenoiser":
         match path:
             case str():
@@ -825,7 +861,13 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         for path in paths:
             logging.info(f"Opening {path}")
             with checkpointing.Checkpoint(path) as c:
-                model = c.read_model().eval()
+                model = (
+                    c.read_model(
+                        map_location=None,
+                        allow_second_order_derivatives=allow_second_order_derivatives,
+                    )
+                    .eval()
+                )
                 experts.append(model)
                 batch_info = c.read_batch_info()
         return cls(experts, sigma_thresholds=sigma_thresholds, batch_info=batch_info)
@@ -873,5 +915,6 @@ def load(model: str, root="") -> CBottle3d:
             paths,
             sigma_thresholds=(100.0, 10.0),
             separate_classifier_path=classifier_path,
+            allow_second_order_derivatives=True,
         )
     raise ValueError(model)
