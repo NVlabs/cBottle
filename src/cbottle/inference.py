@@ -385,21 +385,27 @@ class CBottle3d:
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
 
-    def normalize_and_reorder(self, x: torch.Tensor) -> torch.Tensor:
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Unpost-process the output by reordering to HPXPAD convention and normalizing.
+        Unpost-process the output by normalizing.
         """
         info = self.batch_info
+        scales = info.scales
+        center = info.center
+        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
+            :, None, None
+        ].to(x)
+        return x
+
+    def reorder(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by reordering to HPXPAD convention.
+        """
         grid_obj = getattr(self.net.domain, "_grid", None)
         if grid_obj is None:
             # Fallback: try to get grid from domain directly
             grid_obj = self.net.domain
-        scales = info.scales
-        center = info.center
         x = self.output_grid.reorder(grid_obj.pixel_order, x)
-        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
-            :, None, None
-        ].to(x)
         return x
 
     @property
@@ -926,3 +932,21 @@ def load(model: str, root="") -> CBottle3d:
             allow_second_order_derivatives=True,
         )
     raise ValueError(model)
+
+
+def sample_for_superresolution(
+    coarse_model: CBottle3d,
+    batch: dict,
+    indices_where_tc: torch.Tensor,
+):
+    out, coords = coarse_model.sample(
+        batch,
+        guidance_pixels=indices_where_tc,
+    )
+    out = coarse_model.normalize(out)
+    out = coarse_model.reorder(out)
+
+    batch["target"] = out
+    out, coords = coarse_model.translate(batch, dataset="icon")
+
+    return out, coords
