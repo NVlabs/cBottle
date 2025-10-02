@@ -146,10 +146,10 @@ class CBottle3d:
             # Fallback: try to get grid from domain directly
             grid_obj = self.net.domain
 
+        x = grid_obj.reorder(self.output_grid.pixel_order, x)
         if info.scales is not None and info.center is not None:
             scales = info.scales
             center = info.center
-            x = grid_obj.reorder(self.output_grid.pixel_order, x)
             x = torch.tensor(scales)[:, None, None].to(x) * x + torch.tensor(center)[
                 :, None, None
             ].to(x)
@@ -396,12 +396,12 @@ class CBottle3d:
         if grid_obj is None:
             # Fallback: try to get grid from domain directly
             grid_obj = self.net.domain
-        scales = info.scales
-        center = info.center
+
         x = self.output_grid.reorder(grid_obj.pixel_order, x)
-        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
-            :, None, None
-        ].to(x)
+        if info.scales is not None and info.center is not None:
+            x = (x - torch.tensor(info.center)[:, None, None].to(x)) / torch.tensor(info.scales)[
+                :, None, None
+            ].to(x)
         return x
 
     @property
