@@ -308,7 +308,7 @@ class CBottle3d:
     ) -> dict:
         batch = self._move_to_device(batch)
 
-        images = batch["target"]
+        images = batch["encoded"]
         condition = batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
@@ -384,6 +384,29 @@ class CBottle3d:
         out = self._post_process(out)
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by normalizing.
+        """
+        info = self.batch_info
+        scales = info.scales
+        center = info.center
+        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
+            :, None, None
+        ].to(x)
+        return x
+
+    def _reorder(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by reordering to HPXPAD convention.
+        """
+        grid_obj = getattr(self.net.domain, "_grid", None)
+        if grid_obj is None:
+            # Fallback: try to get grid from domain directly
+            grid_obj = self.net.domain
+        x = self.output_grid.reorder(grid_obj.pixel_order, x)
+        return x
 
     @property
     def coords(self) -> Coords:
@@ -546,6 +569,23 @@ class CBottle3d:
         return self.classifier_grid.ang2pix(
             torch.as_tensor(lons), torch.as_tensor(lats)
         )
+
+    def sample_for_superresolution(
+        self,
+        batch: dict,
+        indices_where_tc: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, Coords]:
+        out, coords = self.sample(
+            batch,
+            guidance_pixels=indices_where_tc,
+        )
+        out = self._normalize(out)
+        out = self._reorder(out)
+
+        batch["target"] = out
+        out, coords = self.translate(batch, dataset="icon")
+
+        return out, coords
 
 
 class SuperResolutionModel:
