@@ -72,6 +72,8 @@ def image_patching(img, src_grid, xy_grid, nside, patch_size, overlap_size):
         img, "n c (f x y) -> (n c) f x y", f=12, x=nside, y=nside
     )
 
+    if img.is_cuda:
+        torch.cuda.set_device(img.device) # WORK AROUND FOR EARTH2GRID BUG
     padded = earth2grid.healpix.pad(img_reshaped, padding=overlap_size)
     padded = einops.rearrange(
         padded,
@@ -136,7 +138,6 @@ def apply_on_patches(
         x_lr_patch = torch.cat(
             (x_lr_patch, global_lr.repeat(x_lr_patch.shape[0], 1, 1, 1)), dim=1
         )
-
     pos_embd_patch = image_patching(
         denoise.model.pos_embed[None,],
         src_grid,
@@ -160,7 +161,6 @@ def apply_on_patches(
     if inbox_patch_index is not None:
         batch_index = torch.tensor(inbox_patch_index)
     num_batch = math.ceil(len(batch_index) / batch_size)
-
     # denoise
     for batch in range(num_batch):
         patch_indices_in_batch = batch_index[
@@ -176,7 +176,6 @@ def apply_on_patches(
         ).to(torch.float64)
     if pbar is not None:
         pbar.update()
-
     # Un-merge batch dim of output
     if patch_size:
         out = einops.rearrange(
