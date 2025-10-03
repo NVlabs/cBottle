@@ -313,7 +313,7 @@ class CBottle3d:
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
 
-        labels_when_nan = torch.zeros_like(batch["labels"].cuda())
+        labels_when_nan = torch.zeros_like(batch["labels"].to(images.device))
         labels_when_nan[:, LABELS.index(dataset_when_nan)] = 1.0
         labels = torch.nn.functional.one_hot(
             torch.tensor([LABELS.index(dataset)], device=condition.device), 1024

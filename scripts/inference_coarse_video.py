@@ -239,8 +239,8 @@ def run_inference(
                 images = batch["target"]
                 labels = batch["labels"]
                 condition = batch["condition"]
-                second_of_day = batch["second_of_day"].cuda().float()
-                day_of_year = batch["day_of_year"].cuda().float()
+                second_of_day = batch["second_of_day"].to(images.device).float()
+                day_of_year = batch["day_of_year"].to(images.device).float()
 
                 labels_when_nan = None
                 if config.denoiser_type == DenoiserType.mask_filling:
