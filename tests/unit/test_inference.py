@@ -13,7 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
-from cbottle.inference import CBottle3d, SuperResolutionModel, Coords
+from cbottle.inference import (
+    CBottle3d,
+    SuperResolutionModel,
+    DistilledSuperResolutionModel,
+    Coords,
+)
 from cbottle import models
 from cbottle.datasets.base import BatchInfo
 from cbottle.datasets.dataset_2d import MAX_CLASSES as LABEL_DIM
@@ -72,6 +77,37 @@ def create_super_resolution_model():
     )
 
 
+def create_distilled_super_resolution_model():
+    # Create a SuperResolutionModel object with a simple network
+    batch_info = BatchInfo(
+        channels=["rlut", "rsut", "rsds"],
+        scales=[1.0, 1.0, 1.0],
+        center=[0.0, 0.0, 0.0],
+    )
+    out_channels = len(batch_info.scales)
+    local_lr_channels = out_channels
+    global_lr_channels = out_channels
+    net = models.get_model(
+        models.ModelConfigV1(
+            "unet_hpx1024_patch",
+            model_channels=8,
+            out_channels=3,
+            condition_channels=local_lr_channels + global_lr_channels,
+            label_dim=LABEL_DIM,
+        )
+    )
+    return DistilledSuperResolutionModel(
+        net,
+        batch_info,
+        hpx_level=10,
+        hpx_lr_level=6,
+        patch_size=128,
+        overlap_size=32,
+        sigma_max=800,
+        device="cuda",
+    )
+
+
 def create_input_data(target_shape):
     """Helper function to create input data for tests."""
     b, c, t, x = target_shape
@@ -112,6 +148,18 @@ def test_super_resolution_model_call():
     coords = Coords(model.batch_info, model.low_res_grid)
     output, hr_coords = model(low_res_tensor, coords, extents)
     assert output is not None
+    assert hr_coords is not None
+
+
+def test_distilled_super_resolution_model_call():
+    model = create_distilled_super_resolution_model()
+    # Test the __call__ method
+    low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
+    coords = model.batch_info
+    extents = (0, 5, 0, 5)
+    coords = Coords(model.batch_info, model.low_res_grid)
+    output, hr_coords = model(low_res_tensor, coords, extents)
+    assert output is not None and output.shape == (1, 3, 1, 12 * 1024**2)
     assert hr_coords is not None
 
 
