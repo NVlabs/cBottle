@@ -41,9 +41,7 @@ model = cbottle.inference.load(
 indices_where_tc = model.get_guidance_pixels(lons, lats)
 
 if for_superresolution:
-    out, coords = cbottle.inference.sample_for_superresolution(
-        model, batch, indices_where_tc
-    )
+    out, coords = model.sample_for_superresolution(batch, indices_where_tc)
 else:
     out, coords = model.sample(
         batch,
