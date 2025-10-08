@@ -387,21 +387,27 @@ class CBottle3d:
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
 
-    def normalize_and_reorder(self, x: torch.Tensor) -> torch.Tensor:
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Unpost-process the output by reordering to HPXPAD convention and normalizing.
+        Unpost-process the output by normalizing.
         """
         info = self.batch_info
+        scales = info.scales
+        center = info.center
+        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
+            :, None, None
+        ].to(x)
+        return x
+
+    def _reorder(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by reordering to HPXPAD convention.
+        """
         grid_obj = getattr(self.net.domain, "_grid", None)
         if grid_obj is None:
             # Fallback: try to get grid from domain directly
             grid_obj = self.net.domain
-
         x = self.output_grid.reorder(grid_obj.pixel_order, x)
-        if info.scales is not None and info.center is not None:
-            x = (x - torch.tensor(info.center)[:, None, None].to(x)) / torch.tensor(info.scales)[
-                :, None, None
-            ].to(x)
         return x
 
     @property
@@ -547,6 +553,7 @@ class CBottle3d:
                     D,
                     xT,
                     randn_like=torch.randn_like,
+                    sigma_min=self.sigma_min,
                     sigma_max=int(
                         self.sigma_max
                     ),  # Convert to int for type compatibility
@@ -562,6 +569,23 @@ class CBottle3d:
         return self.classifier_grid.ang2pix(
             torch.as_tensor(lons), torch.as_tensor(lats)
         )
+
+    def sample_for_superresolution(
+        self,
+        batch: dict,
+        indices_where_tc: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, Coords]:
+        out, coords = self.sample(
+            batch,
+            guidance_pixels=indices_where_tc,
+        )
+        out = self._normalize(out)
+        out = self._reorder(out)
+
+        batch["target"] = out
+        out, coords = self.translate(batch, dataset="icon")
+
+        return out, coords
 
 
 class SuperResolutionModel:
