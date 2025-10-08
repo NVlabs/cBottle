@@ -556,7 +556,6 @@ class CBottle3d:
                     sigma_max=int(
                         self.sigma_max
                     ),  # Convert to int for type compatibility
-                    sigma_min=self.sigma_min,
                     num_steps=self.num_steps,
                 )
 
