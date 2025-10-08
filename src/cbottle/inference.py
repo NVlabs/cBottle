@@ -372,7 +372,6 @@ class CBottle3d:
         self, batch: dict, dataset: Literal["icon", "era5"]
     ) -> tuple[torch.Tensor, Coords]:
 
-        batch["target"] = self.normalize_and_reorder(batch["target"])
         # Move all tensors to the correct device
         encoded = self._encode(batch)
         with torch.no_grad():
