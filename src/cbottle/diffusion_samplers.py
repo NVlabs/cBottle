@@ -177,7 +177,6 @@ def few_step_sampler(
     sigma_max: float = 80.0,
     sigma_mid: Optional[List[float]] = None,
 ):
-
     # Adjust noise levels based on what's supported by the network.
     # Time step discretization.
     sigma_mid = [] if sigma_mid is None else sigma_mid
@@ -194,7 +193,6 @@ def few_step_sampler(
     # Sampling steps
     latents = latents * t_steps[0]
     for t_cur, t_next in zip(t_steps[:-1], t_steps[1:]):
-
         latents = net(latents, t_cur).to(torch.float64)
 
         if t_next > 0:
