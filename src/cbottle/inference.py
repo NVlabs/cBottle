@@ -858,7 +858,7 @@ def load(model: str, root="") -> CBottle3d:
         paths = [os.path.join(root, rundir, c) for c in checkpoints]
         return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
     elif model == "cbottle-3d-moe-tc":
-        rundir = os.path.join(root, "cBottle-3d")
+        rundir = "cBottle-3d"
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
             ","
         )
