@@ -1051,27 +1051,18 @@ def load(model: str, root="") -> CBottle3d:
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
             ","
         )
-        rundir = "v6data-mChan192"
+        rundir = "cBottle-3d"
         paths = [os.path.join(root, rundir, c) for c in checkpoints]
         return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
-    elif model == "cbottle-3d":
-        path = os.path.join(
-            root, "v6data-mChan192", "training-state-009856000.checkpoint"
-        )
-        return CBottle3d.from_pretrained(path)
-    elif model == "cbottle-3d-tc":
-        path = os.path.join(
-            root,
-            "test_classifier_after_main_merge2",
-            "training-state-010240000.checkpoint",
-        )
-        return CBottle3d.from_pretrained(path)
     elif model == "cbottle-3d-moe-tc":
+        rundir = "cBottle-3d"
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
             ","
         )
-        paths = [os.path.join(root, c) for c in checkpoints]
-        classifier_path = os.path.join(root, "training-state-002176000.checkpoint")
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        classifier_path = os.path.join(
+            root, "cBottle-3d-tc", "training-state-002176000.checkpoint"
+        )
         return CBottle3d.from_pretrained(
             paths,
             sigma_thresholds=(100.0, 10.0),
