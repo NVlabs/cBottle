@@ -73,7 +73,7 @@ def image_patching(img, src_grid, xy_grid, nside, patch_size, overlap_size):
     )
 
     if img.is_cuda:
-        torch.cuda.set_device(img.device) # WORK AROUND FOR EARTH2GRID BUG
+        torch.cuda.set_device(img.device)  # WORK AROUND FOR EARTH2GRID BUG
     padded = earth2grid.healpix.pad(img_reshaped, padding=overlap_size)
     padded = einops.rearrange(
         padded,

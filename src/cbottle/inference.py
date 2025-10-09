@@ -115,13 +115,10 @@ class CBottle3d:
         if separate_classifier_path is not None:
             logging.info(f"Opening additional classifier at {separate_classifier_path}")
             with checkpointing.Checkpoint(separate_classifier_path) as c:
-                separate_classifier = (
-                    c.read_model(
-                        map_location=None,
-                        allow_second_order_derivatives=allow_second_order_derivatives,
-                    )
-                    .eval()
-                )
+                separate_classifier = c.read_model(
+                    map_location=None,
+                    allow_second_order_derivatives=allow_second_order_derivatives,
+                ).eval()
 
         return cls(net, separate_classifier=separate_classifier, **kwargs)
 
@@ -371,7 +368,6 @@ class CBottle3d:
     def translate(
         self, batch: dict, dataset: Literal["icon", "era5"]
     ) -> tuple[torch.Tensor, Coords]:
-
         # Move all tensors to the correct device
         encoded = self._encode(batch)
         with torch.no_grad():
@@ -450,7 +446,9 @@ class CBottle3d:
         batch_size = second_of_day.shape[0]
 
         label_ind = labels.nonzero()[:, 1]
-        mask = torch.stack([self.icon_mask, self.era5_mask]).to(self.device)[label_ind]  # n, c
+        mask = torch.stack([self.icon_mask, self.era5_mask]).to(self.device)[
+            label_ind
+        ]  # n, c
         mask = mask[:, :, None, None]
 
         with torch.no_grad():
@@ -480,7 +478,7 @@ class CBottle3d:
             labels_when_nan[:, 0] = 1
 
             guidance_data = guidance_pixels
-            if not guidance_pixels is None and guidance_pixels.ndim == 1:
+            if guidance_pixels is not None and guidance_pixels.ndim == 1:
                 guidance_data = torch.full(
                     (batch_size, 1, 1, *self.classifier_grid.shape),
                     torch.nan,
@@ -512,11 +510,10 @@ class CBottle3d:
                     ).out
                 else:
                     d2 = 0.0
-                
+
                 d = out.out.where(mask, d2)
                 if guidance_data is not None and guidance_scale > 0:
                     if self.separate_classifier is not None:
-
                         out.logits = self.separate_classifier(
                             x_hat,
                             t_hat,
@@ -885,13 +882,10 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         for path in paths:
             logging.info(f"Opening {path}")
             with checkpointing.Checkpoint(path) as c:
-                model = (
-                    c.read_model(
-                        map_location=None,
-                        allow_second_order_derivatives=allow_second_order_derivatives,
-                    )
-                    .eval()
-                )
+                model = c.read_model(
+                    map_location=None,
+                    allow_second_order_derivatives=allow_second_order_derivatives,
+                ).eval()
                 experts.append(model)
                 batch_info = c.read_batch_info()
         return cls(experts, sigma_thresholds=sigma_thresholds, batch_info=batch_info)
