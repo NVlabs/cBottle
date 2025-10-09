@@ -17,6 +17,7 @@
 
 import numpy as np
 import torch
+from typing import List, Optional
 
 
 def edm_sampler_steps(
@@ -167,6 +168,37 @@ def edm_sampler_from_sigma(
             x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
     return x_next
+
+
+def few_step_sampler(
+    net,
+    latents,
+    sigma_min: float = 0.002,
+    sigma_max: float = 80.0,
+    sigma_mid: Optional[List[float]] = None,
+):
+    # Adjust noise levels based on what's supported by the network.
+    # Time step discretization.
+    sigma_mid = [] if sigma_mid is None else sigma_mid
+    # t_0 = T, t_N = 0
+    # Max noise level (adjust based on what's supported by the network)
+    sigma_max = min(sigma_max, net.sigma_max)
+
+    t_steps = torch.tensor(
+        [sigma_max] + list(sigma_mid), dtype=latents.dtype, device=latents.device
+    )
+    t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])])
+    assert torch.all(t_steps[1:] <= t_steps[:-1])
+
+    # Sampling steps
+    latents = latents * t_steps[0]
+    for t_cur, t_next in zip(t_steps[:-1], t_steps[1:]):
+        latents = net(latents, t_cur).to(torch.float64)
+
+        if t_next > 0:
+            latents = latents + t_next * torch.randn_like(latents)
+
+    return latents
 
 
 # ----------------------------------------------------------------------------
