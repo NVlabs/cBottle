@@ -667,9 +667,6 @@ class SuperResolutionModel:
 
     def _apply_on_patches(
         self,
-        net,
-        patch_size,
-        overlap_size,
         x_hat,
         x_lr,
         t_hat,
@@ -677,12 +674,11 @@ class SuperResolutionModel:
         batch_size,
         global_lr,
         inbox_patch_index,
-        device,
     ):
         return patchify.apply_on_patches(
-            denoise=net,
-            patch_size=patch_size,
-            overlap_size=overlap_size,
+            self.net,
+            patch_size=self.patch_size,
+            overlap_size=self.overlap_size,
             x_hat=x_hat,
             x_lr=x_lr,
             t_hat=t_hat,
@@ -690,7 +686,7 @@ class SuperResolutionModel:
             batch_size=batch_size,
             global_lr=global_lr,
             inbox_patch_index=inbox_patch_index,
-            device=device,
+            device=self.device,
         )
 
     def __call__(
@@ -850,9 +846,6 @@ class SuperResolutionModel:
             def denoiser(x, t):
                 return (
                     self._apply_on_patches(
-                        net=self.net,
-                        patch_size=self.patch_size,
-                        overlap_size=self.overlap_size,
                         x_hat=x,
                         x_lr=lr_hr,
                         t_hat=t,
@@ -860,7 +853,6 @@ class SuperResolutionModel:
                         batch_size=128,
                         global_lr=global_lr,
                         inbox_patch_index=inbox_patch_index,
-                        device=self.device,
                     )
                     .to(torch.float64)
                     .to(self.device)
@@ -933,9 +925,6 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
 
     def _apply_on_patches(
         self,
-        net,
-        patch_size,
-        overlap_size,
         x_hat,
         x_lr,
         t_hat,
@@ -943,12 +932,11 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
         batch_size,
         global_lr,
         inbox_patch_index,
-        device,
     ):
         return patchify.apply_on_patches(
-            denoise=net,
-            patch_size=patch_size,
-            overlap_size=overlap_size,
+            self.net,
+            patch_size=self.patch_size,
+            overlap_size=self.overlap_size,
             x_hat=x_hat,
             x_lr=x_lr,
             t_hat=t_hat,
@@ -957,7 +945,7 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
             global_lr=global_lr,
             inbox_patch_index=inbox_patch_index,
             window=self.window,
-            device=device,
+            device=self.device,
         )
 
     def _sample(self, denoiser, latents):

@@ -17,6 +17,7 @@ import torch
 import einops
 import earth2grid
 import math
+from typing import Optional
 
 
 def patch_index_from_bounding_box(order, box, patch_size, overlap_size, device="cuda"):
@@ -106,7 +107,7 @@ def apply_on_patches(
     pbar=None,
     global_lr=None,
     inbox_patch_index=None,
-    window=None,
+    window: Optional[torch.Tensor] = None,
     device="cuda",
 ):
     """
@@ -114,6 +115,7 @@ def apply_on_patches(
         denoise: used like this `out = denoise(patches, sigma)
         x_hat: Latent map, NEST convention
         x_lr: condition, NEST convention
+        window: Tensor of shape (1,1,patch_size,patch_size) that weights each pixel by proximity to patch boundary.
     """
     order = int(np.log2(np.sqrt(x_lr.shape[-1] // 12)))
     nside = 2**order
