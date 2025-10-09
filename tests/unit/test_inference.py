@@ -113,7 +113,9 @@ def create_input_data(target_shape):
     b, c, t, x = target_shape
     return {
         "target": torch.randn(*target_shape).cuda(),
-        "labels": torch.nn.functional.one_hot(torch.tensor([1]), num_classes=LABEL_DIM).cuda(),
+        "labels": torch.nn.functional.one_hot(
+            torch.tensor([1]), num_classes=LABEL_DIM
+        ).cuda(),
         "condition": torch.zeros(b, 0, t, x).cuda(),
         "second_of_day": torch.tensor([[43200]]).cuda(),
         "day_of_year": torch.tensor([[180]]).cuda(),
