@@ -1,4 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# 
+install-linters: ## install the linters
+	pip install uv mypy==1.9.0 ruff==0.6.9
+
 lint:
 	python3 ci/check_licenses.py
 	python -m ruff format --check

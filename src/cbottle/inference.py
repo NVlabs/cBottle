@@ -309,7 +309,7 @@ class CBottle3d:
     ) -> dict:
         batch = self._move_to_device(batch)
 
-        images = batch["target"]
+        images = batch["encoded"]
         condition = batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
@@ -386,6 +386,29 @@ class CBottle3d:
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
 
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by normalizing.
+        """
+        info = self.batch_info
+        scales = info.scales
+        center = info.center
+        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
+            :, None, None
+        ].to(x)
+        return x
+
+    def _reorder(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by reordering to HPXPAD convention.
+        """
+        grid_obj = getattr(self.net.domain, "_grid", None)
+        if grid_obj is None:
+            # Fallback: try to get grid from domain directly
+            grid_obj = self.net.domain
+        x = self.output_grid.reorder(grid_obj.pixel_order, x)
+        return x
+
     @property
     def coords(self) -> Coords:
         return Coords(self.batch_info, self.output_grid)
@@ -398,6 +421,10 @@ class CBottle3d:
     def era5_mask(self):
         masked_vars = ["rlut", "rsut", "rsds"]
         return torch.tensor([c not in masked_vars for c in self.batch_info.channels])
+
+    @property
+    def time_length(self):
+        return self.net.time_length
 
     def sample(
         self,
@@ -438,7 +465,7 @@ class CBottle3d:
                 (
                     batch_size,
                     self.net.img_channels,
-                    self.net.time_length,
+                    self.time_length,
                     self.net.domain.numel(),
                 ),
                 device=device,
@@ -529,6 +556,7 @@ class CBottle3d:
                     D,
                     xT,
                     randn_like=torch.randn_like,
+                    sigma_min=self.sigma_min,
                     sigma_max=int(
                         self.sigma_max
                     ),  # Convert to int for type compatibility
@@ -542,6 +570,23 @@ class CBottle3d:
         return self.classifier_grid.ang2pix(
             torch.as_tensor(lons), torch.as_tensor(lats)
         )
+
+    def sample_for_superresolution(
+        self,
+        batch: dict,
+        indices_where_tc: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, Coords]:
+        out, coords = self.sample(
+            batch,
+            guidance_pixels=indices_where_tc,
+        )
+        out = self._normalize(out)
+        out = self._reorder(out)
+
+        batch["target"] = out
+        out, coords = self.translate(batch, dataset="icon")
+
+        return out, coords
 
 
 class SuperResolutionModel:

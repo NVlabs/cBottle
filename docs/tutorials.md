@@ -2,9 +2,36 @@
 
 ## Step 1: Configure Data Paths
 
-Edit the paths in `cBottle/src/cbottle/config/environment.py` to point to your data sources.  
-Set the corresponding profile variables to `""` if you're using local storage.
+cBottle uses environment variables to configure system-specific details like the
+location of datasets. This makes makes it easy to train models across different
+systems and environments (see [this](https://12factor.net/config).
 
+You may configure these env vars however you like, e.g. in your .bashrc or
+submission script, but cBottle will automatically load any variables listed in
+the popular `.env` format. You can start by creating a .env in the current directory
+containing this
+
+```
+###############
+# ERA5 inputs #
+###############
+V6_ERA5_ZARR=path/to/era5
+
+
+########
+# ICON #
+########
+RAW_DATA_URL=path/to/high-res/icon
+V6_ICON_ZARR=<path>
+
+LAND_DATA_URL_10=<path>
+LAND_DATA_URL_6=<path>
+
+SST_MONMEAN_DATA_URL_6=<path>
+
+# location for training outputs
+PROJECT_ROOT=<path>
+```
 
 ## Step 2: Run Inference with the Coarse Generator
 
