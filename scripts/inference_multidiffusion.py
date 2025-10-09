@@ -208,7 +208,7 @@ def inference(arg_list=None, customized_dataset=None):
                     npix = lr.size(-1)
                     shape = lr.shape[:-1]
                     lr = lr.view(shape + (npix // 4, 4)).mean(-1)
-                inp = lr.cuda()[None, :, None]
+                inp = lr.to(target.device)[None, :, None]
             # load condition if input path is given
             else:
                 inp = batch["condition"]

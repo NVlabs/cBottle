@@ -497,6 +497,8 @@ class Conv2dHealpix(torch.nn.Module):
         )
         x = x.permute(0, 1, 4, 2, 3)  # channels_last N F C H W
         # TODO: Add torch.compile for indexing backend
+        if x.is_cuda:
+            torch.cuda.set_device(x.device)  # WORK AROUND FOR EARTH2GRID BUG
         with pad_backend(self.padding_backend):
             x = healpix_pad(x, padding)
         x = x.permute(0, 1, 3, 4, 2)  # N F H W C
