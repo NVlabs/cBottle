@@ -106,6 +106,7 @@ def apply_on_patches(
     pbar=None,
     global_lr=None,
     inbox_patch_index=None,
+    window=None,
     device="cuda",
 ):
     """
@@ -178,7 +179,75 @@ def apply_on_patches(
         pbar.update()
 
     # Un-merge batch dim of output
-    if patch_size:
+    if patch_size and (window is not None):
+        if window.shape[0] == 1:
+            window = window.tile((out.shape[0], out.shape[1], 1, 1))
+
+        out = einops.rearrange(
+            out * window,
+            "(n f cx cy) c x y -> n (f c x y) (cx cy)",
+            x=patch_size,
+            y=patch_size,
+            f=12,
+            cx=cx,
+            cy=cy,
+        )
+        weights = einops.rearrange(
+            window,
+            "(n f cx cy) c x y -> n (f c x y) (cx cy)",
+            x=patch_size,
+            y=patch_size,
+            f=12,
+            cx=cx,
+            cy=cy,
+        )
+
+        # Compute average of overlapping patches
+        weights = torch.nn.functional.fold(
+            weights,
+            (padded_patch_size, padded_patch_size),
+            (patch_size, patch_size),
+            stride=stride,
+        )
+        out = torch.nn.functional.fold(
+            out,
+            (padded_patch_size, padded_patch_size),
+            (patch_size, patch_size),
+            stride=stride,
+        )
+        out = out / weights
+
+        # Reshape again and discard padding
+        out = einops.rearrange(
+            out,
+            "n (f c) x y -> n f c x y",
+            f=12,
+        )
+        weights = einops.rearrange(
+            weights,
+            "n (f c) x y -> n f c x y",
+            f=12,
+        )
+        out = out[
+            ...,
+            overlap_size : nside + overlap_size,
+            overlap_size : nside + overlap_size,
+        ]
+        weights = weights[
+            ...,
+            overlap_size : nside + overlap_size,
+            overlap_size : nside + overlap_size,
+        ]
+
+        out_xy = einops.rearrange(
+            out,
+            "n f c x y -> n c (f x y)",
+            x=nside,
+            y=nside,
+            f=12,
+        )
+
+    elif patch_size:
         out = einops.rearrange(
             out,
             "(n f cx cy) c x y -> n (f c x y) (cx cy)",

@@ -107,6 +107,16 @@ def inference(arg_list=None, customized_dataset=None):
         help="Bounding box (lon_west lon_east lat_south lat_north) where super-resolution will be applied. "
         "Regions outside the box remain coarse.",
     )
+    parser.add_argument(
+        "--window-function",
+        type=str,
+        default=None,
+        help="Which window smoothing function to use",
+    )
+    parser.add_argument(
+        "--window-alpha", type=float, default=10, help="window function alpha"
+    )
+
     args = parser.parse_args(arg_list)
     input_path = args.input_path
     state_path = args.state_path
@@ -116,6 +126,8 @@ def inference(arg_list=None, customized_dataset=None):
     hpx_level = args.level
     min_samples = args.min_samples
     box = tuple(args.super_resolution_box) if args.super_resolution_box else None
+    window_function = args.window_function
+    window_alpha = args.window_alpha
 
     LOCAL_RANK = int(os.getenv("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
@@ -179,6 +191,8 @@ def inference(arg_list=None, customized_dataset=None):
             overlap_size=args.overlap_size,
             num_steps=args.num_steps,
             sigma_max=args.sigma_max,
+            window_function=window_function,
+            window_alpha=window_alpha,
             device=device,
         )
     else:
@@ -214,7 +228,6 @@ def inference(arg_list=None, customized_dataset=None):
                 inp = batch["condition"]
                 inp = inp
                 inp = inp.cuda(non_blocking=True)
-
         if args.save_data:
             pred = target[None, :, None]
         else:

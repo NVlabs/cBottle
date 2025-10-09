@@ -104,6 +104,8 @@ def create_distilled_super_resolution_model():
         patch_size=128,
         overlap_size=32,
         sigma_max=800,
+        window_function="KBD",
+        window_alpha=1,
         device="cuda",
     )
 

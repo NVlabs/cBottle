@@ -27,6 +27,7 @@ from earth2grid import healpix
 from typing import Literal
 import dataclasses
 import logging
+from scipy.signal.windows import kaiser_bessel_derived
 
 import cbottle.denoiser_factories
 from . import checkpointing, patchify
@@ -664,6 +665,34 @@ class SuperResolutionModel:
             denoiser, latents, num_steps=self.num_steps, sigma_max=self.sigma_max
         )
 
+    def _apply_on_patches(
+        self,
+        net,
+        patch_size,
+        overlap_size,
+        x_hat,
+        x_lr,
+        t_hat,
+        class_labels,
+        batch_size,
+        global_lr,
+        inbox_patch_index,
+        device,
+    ):
+        return patchify.apply_on_patches(
+            denoise=net,
+            patch_size=patch_size,
+            overlap_size=overlap_size,
+            x_hat=x_hat,
+            x_lr=x_lr,
+            t_hat=t_hat,
+            class_labels=class_labels,
+            batch_size=batch_size,
+            global_lr=global_lr,
+            inbox_patch_index=inbox_patch_index,
+            device=device,
+        )
+
     def __call__(
         self,
         x: torch.Tensor,
@@ -820,8 +849,8 @@ class SuperResolutionModel:
             # Define denoiser function
             def denoiser(x, t):
                 return (
-                    patchify.apply_on_patches(
-                        self.net,
+                    self._apply_on_patches(
+                        net=self.net,
                         patch_size=self.patch_size,
                         overlap_size=self.overlap_size,
                         x_hat=x,
@@ -852,6 +881,85 @@ class SuperResolutionModel:
 
 
 class DistilledSuperResolutionModel(SuperResolutionModel):
+    def __init__(
+        self,
+        net: torch.nn.Module,
+        batch_info: base.BatchInfo,
+        hpx_level: int = 10,
+        hpx_lr_level: int = 6,
+        patch_size: int = 128,
+        overlap_size: int = 32,
+        num_steps: int = 18,
+        sigma_max: int = 800,
+        window_function: str = "KBD",
+        window_alpha: int = 1,
+        device: str = "cuda",
+    ):
+        super().__init__(
+            net=net,
+            batch_info=batch_info,
+            hpx_level=hpx_level,
+            hpx_lr_level=hpx_lr_level,
+            patch_size=patch_size,
+            overlap_size=overlap_size,
+            num_steps=num_steps,
+            sigma_max=sigma_max,
+            device=device,
+        )
+        window = self._get_window_function(
+            patch_size=patch_size,
+            window_alpha=window_alpha,
+            type=window_function,
+            dtype=torch.float32,
+            device=device,
+        )
+        window = window.reshape((1, 1, window.shape[0], window.shape[1]))
+        self.window = window
+
+    def _get_window_function(self, patch_size, window_alpha, type="KBD", **kwargs):
+        functions = {
+            "uniform": torch.ones,
+            "KBD": lambda ps: kaiser_bessel_derived(ps, window_alpha * np.pi),
+        }
+
+        if type not in functions.keys():
+            raise ValueError(
+                f"Unknown window function type {type}. Supported types are {list(functions.keys())}"
+            )
+
+        window = torch.tensor(functions[type](patch_size), **kwargs)
+        window = window.unsqueeze(0) * window.unsqueeze(1)
+        return window
+
+    def _apply_on_patches(
+        self,
+        net,
+        patch_size,
+        overlap_size,
+        x_hat,
+        x_lr,
+        t_hat,
+        class_labels,
+        batch_size,
+        global_lr,
+        inbox_patch_index,
+        device,
+    ):
+        return patchify.apply_on_patches(
+            denoise=net,
+            patch_size=patch_size,
+            overlap_size=overlap_size,
+            x_hat=x_hat,
+            x_lr=x_lr,
+            t_hat=t_hat,
+            class_labels=class_labels,
+            batch_size=batch_size,
+            global_lr=global_lr,
+            inbox_patch_index=inbox_patch_index,
+            window=self.window,
+            device=device,
+        )
+
     def _sample(self, denoiser, latents):
         return few_step_sampler(
             denoiser,
