@@ -351,6 +351,7 @@ class GroupNorm(torch.nn.Module):
         else:
             # Use custom GroupNorm implementation that supports channels last
             # memory layout for inference
+            x = x.float()
             x = einops.rearrange(x, "b (g c) h w -> b g c h w", g=self.num_groups)
 
             mean = x.mean(dim=[2, 3, 4], keepdim=True)
@@ -396,7 +397,7 @@ def NoCopyNCHW2NHWC(x: torch.Tensor):
     """
     if not x.is_contiguous(memory_format=torch.channels_last):
         warnings.warn(
-            f"Cannot do a zero-copy NCHW to NHWC. Performing explicit transpose...\nx.shape = {x.shape}, x.stride() = {x.stride()}",
+            f"Cannot do a zero-copy NCHW to NHWC. Performing explicit transpose...\nx.shape = {x.shape}, x.stride() = {x.stride()}"
         )
         x = x.to(memory_format=torch.channels_last)
     if x.dim() != 4:
@@ -414,7 +415,7 @@ def NoCopyNHWC2NCHW(x: torch.Tensor):
     """
     if not x.is_contiguous(memory_format=torch.contiguous_format):
         warnings.warn(
-            "Cannot do a zero-copy NHWC to NCHW. Performing explicit transpose...",
+            "Cannot do a zero-copy NHWC to NCHW. Performing explicit transpose..."
         )
         x = x.to(memory_format=torch.contiguous_format)
     if x.dim() != 4:
