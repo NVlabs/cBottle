@@ -33,7 +33,6 @@ from . import checkpointing, patchify
 from .diffusion_samplers import (
     edm_sampler,
     edm_sampler_from_sigma,
-    edm_sampler_from_sigma_euler,
     edm_sampler_steps,
     few_step_sampler,
     StackedRandomGenerator,
@@ -101,19 +100,13 @@ class CBottle3d:
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
         self.num_steps = num_steps
-        self._sampler = self._get_sampler(sampler_fn)
+        self.sampler_fn = sampler_fn
         self.channels_last = channels_last
         self._convert_model_NHWC()
 
     def _convert_model_NHWC(self):
         if self.channels_last:
             self.net = self.net.to(memory_format=torch.channels_last)
-
-    def _get_sampler(self, sampler_fn):
-        if sampler_fn == "heun":
-            return edm_sampler_from_sigma
-        elif sampler_fn == "euler":
-            return edm_sampler_from_sigma_euler
 
     @classmethod
     def from_pretrained(
@@ -571,7 +564,7 @@ class CBottle3d:
             D.sigma_min = self.net.sigma_min
 
             with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
-                out = self._sampler(
+                out = edm_sampler_from_sigma(
                     D,
                     xT,
                     randn_like=torch.randn_like,
@@ -580,6 +573,7 @@ class CBottle3d:
                         self.sigma_max
                     ),  # Convert to int for type compatibility
                     num_steps=self.num_steps,
+                    sampler_fn=self.sampler_fn,
                 )
 
             out = self._post_process(out)
@@ -978,3 +972,4 @@ def load(model: str, root="") -> CBottle3d:
             allow_second_order_derivatives=True,
         )
     raise ValueError(model)
+ 
