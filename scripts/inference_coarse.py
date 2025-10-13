@@ -16,7 +16,6 @@ import logging
 import os
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
 import cbottle.distributed as dist
 import torch
 import torch.distributed
@@ -120,14 +119,11 @@ def save_inferences(
     config: SamplerArgs,
     rank: int,
     world_size: int,
-    moe_nets: Optional[list[torch.nn.Module]] = None,
     tc_lats: list[float] | None = None,
     tc_lons: list[float] | None = None,
 ):
     attrs = attrs or {}
     tasks = None
-    if moe_nets and len(moe_nets) == 1:
-        moe_nets = None
 
     # Initialize netCDF writer
     nc_config = NetCDFConfig(
@@ -170,7 +166,6 @@ def save_inferences(
             writer.time_index * world_size > config.min_samples
         ):
             break
-        images = batch["target"]
 
         indices_where_tc = None
         if tc_lons is not None:
@@ -182,7 +177,7 @@ def save_inferences(
 
         match config.mode:
             case "save_data":
-                out, coords = model.denormalize(images)
+                out, coords = model.denormalize(batch)
             case "translate":
                 out, coords = model.translate(batch, dataset=config.translate_dataset)
             case "infill":

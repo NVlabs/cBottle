@@ -35,6 +35,7 @@ from .diffusion_samplers import (
     edm_sampler_from_sigma,
     edm_sampler_from_sigma_euler,
     edm_sampler_steps,
+    few_step_sampler,
     StackedRandomGenerator,
 )
 from .datasets import base
@@ -133,14 +134,10 @@ class CBottle3d:
         if separate_classifier_path is not None:
             logging.info(f"Opening additional classifier at {separate_classifier_path}")
             with checkpointing.Checkpoint(separate_classifier_path) as c:
-                separate_classifier = (
-                    c.read_model(
-                        map_location=None,
-                        allow_second_order_derivatives=allow_second_order_derivatives,
-                    )
-                    .cuda()
-                    .eval()
-                )
+                separate_classifier = c.read_model(
+                    map_location=None,
+                    allow_second_order_derivatives=allow_second_order_derivatives,
+                ).eval()
 
         return cls(net, separate_classifier=separate_classifier, **kwargs)
 
@@ -165,12 +162,13 @@ class CBottle3d:
             # Fallback: try to get grid from domain directly
             grid_obj = self.net.domain
 
-        scales = info.scales
-        center = info.center
         x = grid_obj.reorder(self.output_grid.pixel_order, x)
-        x = torch.tensor(scales)[:, None, None].to(x) * x + torch.tensor(center)[
-            :, None, None
-        ].to(x)
+        if info.scales is not None and info.center is not None:
+            scales = info.scales
+            center = info.center
+            x = torch.tensor(scales)[:, None, None].to(x) * x + torch.tensor(center)[
+                :, None, None
+            ].to(x)
         return x
 
     def _move_to_device(self, batch: dict) -> dict:
@@ -326,12 +324,12 @@ class CBottle3d:
     ) -> dict:
         batch = self._move_to_device(batch)
 
-        images = batch["target"]
+        images = batch["encoded"]
         condition = batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
 
-        labels_when_nan = torch.zeros_like(batch["labels"].cuda())
+        labels_when_nan = torch.zeros_like(batch["labels"].to(images.device))
         labels_when_nan[:, LABELS.index(dataset_when_nan)] = 1.0
         labels = torch.nn.functional.one_hot(
             torch.tensor([LABELS.index(dataset)], device=condition.device), 1024
@@ -403,6 +401,29 @@ class CBottle3d:
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
 
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by normalizing.
+        """
+        info = self.batch_info
+        scales = info.scales
+        center = info.center
+        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
+            :, None, None
+        ].to(x)
+        return x
+
+    def _reorder(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Unpost-process the output by reordering to HPXPAD convention.
+        """
+        grid_obj = getattr(self.net.domain, "_grid", None)
+        if grid_obj is None:
+            # Fallback: try to get grid from domain directly
+            grid_obj = self.net.domain
+        x = self.output_grid.reorder(grid_obj.pixel_order, x)
+        return x
+
     @property
     def coords(self) -> Coords:
         return Coords(self.batch_info, self.output_grid)
@@ -416,6 +437,10 @@ class CBottle3d:
         masked_vars = ["rlut", "rsut", "rsds"]
         return torch.tensor([c not in masked_vars for c in self.batch_info.channels])
 
+    @property
+    def time_length(self):
+        return self.net.time_length
+
     def sample(
         self,
         batch,
@@ -426,39 +451,39 @@ class CBottle3d:
         bf16=True,
     ):
         """
-
         Args:
 
-            guidance_pixels: pixels of ``self.input_grid``` where the TCs are desired. 0<= guidance_pixels < 12 * nside ^2.
+            guidance_pixels: Either the pixel index of ``self.input_grid``` where the
+                TCs are desired. 0<= guidance_pixels < 12 * nside ^2. Or the enitre HPX
+                tensor already set. If None, no guidance used.
             guidance_scale: float = 0.03,
 
         """
-        batch = self._move_to_device(batch)
         images, labels, condition = batch["target"], batch["labels"], batch["condition"]
-        second_of_day = batch["second_of_day"].cuda().float()
-        day_of_year = batch["day_of_year"].cuda().float()
+        second_of_day = batch["second_of_day"].float()
+        day_of_year = batch["day_of_year"].float()
         batch_size = second_of_day.shape[0]
 
         label_ind = labels.nonzero()[:, 1]
-        mask = torch.stack([self.icon_mask, self.era5_mask]).cuda()[label_ind]  # n, c
+        mask = torch.stack([self.icon_mask, self.era5_mask]).to(self.device)[
+            label_ind
+        ]  # n, c
         mask = mask[:, :, None, None]
 
         with torch.no_grad():
-            device = condition.device
-
             if seed is None:
                 rnd = torch
             else:
-                rnd = StackedRandomGenerator(device, seeds=[seed] * batch_size)
+                rnd = StackedRandomGenerator(self.device, seeds=[seed] * batch_size)
 
             latents = rnd.randn(
                 (
                     batch_size,
                     self.net.img_channels,
-                    self.net.time_length,
+                    self.time_length,
                     self.net.domain.numel(),
                 ),
-                device=device,
+                device=self.device,
             )
 
             if self.channels_last:
@@ -476,20 +501,16 @@ class CBottle3d:
             labels_when_nan = torch.zeros_like(labels)
             labels_when_nan[:, 0] = 1
 
-            if guidance_pixels is not None:
+            guidance_data = guidance_pixels
+            if guidance_pixels is not None and guidance_pixels.ndim == 1:
                 guidance_data = torch.full(
                     (batch_size, 1, 1, *self.classifier_grid.shape),
                     torch.nan,
-                    device=device,
-                    memory_format=(
-                        torch.channels_last
-                        if self.channels_last
-                        else torch.contiguous_format
-                    ),
+                    device=self.device,
                 )
                 guidance_data[:, :, :, guidance_pixels] = 1
-            else:
-                guidance_data = None
+                if self.channels_last:
+                    guidance_data = guidance_data.to(memory_format=torch.channels_last)
 
             def D(x_hat, t_hat):
                 if guidance_data is not None:
@@ -517,7 +538,6 @@ class CBottle3d:
                     d2 = 0.0
 
                 d = out.out.where(mask, d2)
-
                 if guidance_data is not None and guidance_scale > 0:
                     if self.separate_classifier is not None:
                         out.logits = self.separate_classifier(
@@ -555,9 +575,11 @@ class CBottle3d:
                     D,
                     xT,
                     randn_like=torch.randn_like,
+                    sigma_min=self.sigma_min,
                     sigma_max=int(
                         self.sigma_max
                     ),  # Convert to int for type compatibility
+                    num_steps=self.num_steps,
                 )
 
             out = self._post_process(out)
@@ -568,6 +590,23 @@ class CBottle3d:
         return self.classifier_grid.ang2pix(
             torch.as_tensor(lons), torch.as_tensor(lats)
         )
+
+    def sample_for_superresolution(
+        self,
+        batch: dict,
+        indices_where_tc: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, Coords]:
+        out, coords = self.sample(
+            batch,
+            guidance_pixels=indices_where_tc,
+        )
+        out = self._normalize(out)
+        out = self._reorder(out)
+
+        batch["target"] = out
+        out, coords = self.translate(batch, dataset="icon")
+
+        return out, coords
 
 
 class SuperResolutionModel:
@@ -640,8 +679,16 @@ class SuperResolutionModel:
             batch_info = checkpoint.read_batch_info()
         return cls(net, batch_info, **kwargs)
 
+    def _sample(self, denoiser, latents):
+        return edm_sampler(
+            denoiser, latents, num_steps=self.num_steps, sigma_max=self.sigma_max
+        )
+
     def __call__(
-        self, x: torch.Tensor, coords: Coords, extents: tuple
+        self,
+        x: torch.Tensor,
+        coords: Coords,
+        extents: tuple,
     ) -> tuple[torch.Tensor, Coords]:
         """
         Perform super-resolution on a low-resolution tensor with batch processing.
@@ -735,7 +782,9 @@ class SuperResolutionModel:
         return x
 
     def _super_resolve_single_tensor(
-        self, lr_tensor: torch.Tensor, inbox_patch_index: torch.Tensor
+        self,
+        lr_tensor: torch.Tensor,
+        inbox_patch_index: torch.Tensor,
     ) -> torch.Tensor:
         """
         Perform super-resolution on a single low-resolution tensor.
@@ -814,16 +863,22 @@ class SuperResolutionModel:
             denoiser.round_sigma = self.net.round_sigma
 
             # Run EDM sampler
-            pred = edm_sampler(
-                denoiser,
-                latents,
-                num_steps=self.num_steps,
-                sigma_max=self.sigma_max,
-            )
+            pred = self._sample(denoiser, latents)
+
             pred = self.denormalize(pred)
             # Reshape back to original format
             pred = pred.reshape((in_channels, -1))
             return pred
+
+
+class DistilledSuperResolutionModel(SuperResolutionModel):
+    def _sample(self, denoiser, latents):
+        return few_step_sampler(
+            denoiser,
+            latents,
+            sigma_max=self.sigma_max,
+            sigma_mid=[self.sigma_max / 80 * 1.5],
+        )
 
 
 class MixtureOfExpertsDenoiser(torch.nn.Module):
@@ -869,14 +924,10 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         for path in paths:
             logging.info(f"Opening {path}")
             with checkpointing.Checkpoint(path) as c:
-                model = (
-                    c.read_model(
-                        map_location=None,
-                        allow_second_order_derivatives=allow_second_order_derivatives,
-                    )
-                    .cuda()
-                    .eval()
-                )
+                model = c.read_model(
+                    map_location=None,
+                    allow_second_order_derivatives=allow_second_order_derivatives,
+                ).eval()
                 experts.append(model)
                 batch_info = c.read_batch_info()
         return cls(experts, sigma_thresholds=sigma_thresholds, batch_info=batch_info)
@@ -908,27 +959,18 @@ def load(model: str, root="") -> CBottle3d:
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
             ","
         )
-        rundir = "v6data-mChan192"
+        rundir = "cBottle-3d"
         paths = [os.path.join(root, rundir, c) for c in checkpoints]
         return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
-    elif model == "cbottle-3d":
-        path = os.path.join(
-            root, "v6data-mChan192", "training-state-009856000.checkpoint"
-        )
-        return CBottle3d.from_pretrained(path)
-    elif model == "cbottle-3d-tc":
-        path = os.path.join(
-            root,
-            "test_classifier_after_main_merge2",
-            "training-state-010240000.checkpoint",
-        )
-        return CBottle3d.from_pretrained(path)
     elif model == "cbottle-3d-moe-tc":
+        rundir = "cBottle-3d"
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
             ","
         )
-        paths = [os.path.join(root, c) for c in checkpoints]
-        classifier_path = os.path.join(root, "training-state-002176000.checkpoint")
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        classifier_path = os.path.join(
+            root, "cBottle-3d-tc", "training-state-002176000.checkpoint"
+        )
         return CBottle3d.from_pretrained(
             paths,
             sigma_thresholds=(100.0, 10.0),
