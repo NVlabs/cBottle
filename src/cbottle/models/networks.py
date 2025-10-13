@@ -397,7 +397,6 @@ def NoCopyNCHW2NHWC(x: torch.Tensor):
     if not x.is_contiguous(memory_format=torch.channels_last):
         warnings.warn(
             f"Cannot do a zero-copy NCHW to NHWC. Performing explicit transpose...\nx.shape = {x.shape}, x.stride() = {x.stride()}",
-            category=UserWarning,
         )
         x = x.to(memory_format=torch.channels_last)
     if x.dim() != 4:
@@ -416,7 +415,6 @@ def NoCopyNHWC2NCHW(x: torch.Tensor):
     if not x.is_contiguous(memory_format=torch.contiguous_format):
         warnings.warn(
             "Cannot do a zero-copy NHWC to NCHW. Performing explicit transpose...",
-            category=UserWarning,
         )
         x = x.to(memory_format=torch.contiguous_format)
     if x.dim() != 4:
@@ -947,7 +945,6 @@ class TemporalAttention(torch.nn.Module):
         self.seq_length = seq_length
 
     def forward(self, x):
-        # torch disable autocast
         dtype = x.dtype
         x = x.float()
         qkv = self.qkv(self.norm2(x))
