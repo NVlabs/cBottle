@@ -972,4 +972,3 @@ def load(model: str, root="") -> CBottle3d:
             allow_second_order_derivatives=True,
         )
     raise ValueError(model)
- 

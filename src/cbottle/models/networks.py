@@ -651,30 +651,14 @@ class Attention(torch.nn.Module):
         self.num_heads = num_heads
 
     def forward(self, x):
-        x1 = self.qkv(self.norm2(x))
-
-        # # NOTE: V1.0.1 implementation
-        # q, k, v = x1.reshape(
-        #     x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1
-        # ).unbind(2)
-        # w = AttentionOp.apply(q, k)
-        # attn = torch.einsum("nqk,nck->ncq", w, v)
-
         q, k, v = (
-            (
-                x1.reshape(
-                    x.shape[0], self.num_heads, x.shape[1] // self.num_heads, 3, -1
-                )
-            )
-            .permute(0, 1, 4, 3, 2)
-            .unbind(-2)
+            self.qkv(self.norm2(x))
+            .reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1)
+            .unbind(2)
         )
-        attn = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, scale=1 / math.sqrt(k.shape[-1])
-        )
-        attn = attn.transpose(-1, -2)
-
-        x = self.proj(attn.reshape(*x.shape)).add_(x)
+        w = AttentionOp.apply(q, k)
+        a = torch.matmul(v, w.mT)
+        x = self.proj(a.reshape(*x.shape)).add_(x)
         return x
 
 
@@ -963,8 +947,9 @@ class TemporalAttention(torch.nn.Module):
         self.seq_length = seq_length
 
     def forward(self, x):
-        # dtype = x.dtype
-        # x = x.float()
+        # torch disable autocast
+        dtype = x.dtype
+        x = x.float()
         qkv = self.qkv(self.norm2(x))
         q, k, v = einops.rearrange(
             qkv, "b (n heads c) t x -> n (b x) heads t c", n=3, heads=self.num_heads
@@ -981,8 +966,7 @@ class TemporalAttention(torch.nn.Module):
         w = w.softmax(-1)
         out = torch.einsum("bhqk,bhkc->b h c q", w, v)
         out = einops.rearrange(out, "(b x) h c t -> b (h c) t x", x=x.shape[-1])
-        # return self.proj(out).to(dtype)
-        return self.proj(out)
+        return self.proj(out).to(dtype)
 
 
 @dataclass
