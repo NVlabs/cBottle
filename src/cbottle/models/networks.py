@@ -44,6 +44,8 @@ from cbottle.models.embedding import (
     PositionalEmbedding,
 )
 
+import math
+
 if torch.cuda.is_available():
     try:
         apex_gn_module = importlib.import_module("apex.contrib.group_norm")
@@ -95,9 +97,14 @@ class Linear(torch.nn.Module):
         )
 
     def forward(self, x):
-        x = x @ self.weight.to(x.dtype).t()
+        weight, bias = self.weight, self.bias
+        if self.weight is not None and self.weight.dtype != x.dtype:
+            weight = self.weight.to(x.dtype)
+        if self.bias is not None and self.bias.dtype != x.dtype:
+            bias = self.bias.to(x.dtype)
+        x = x @ weight.t()
         if self.bias is not None:
-            x = x.add_(self.bias.to(x.dtype))
+            x = x.add_(bias)
         return x
 
 
@@ -344,7 +351,6 @@ class GroupNorm(torch.nn.Module):
         else:
             # Use custom GroupNorm implementation that supports channels last
             # memory layout for inference
-            x = x.float()
             x = einops.rearrange(x, "b (g c) h w -> b g c h w", g=self.num_groups)
 
             mean = x.mean(dim=[2, 3, 4], keepdim=True)
@@ -390,7 +396,8 @@ def NoCopyNCHW2NHWC(x: torch.Tensor):
     """
     if not x.is_contiguous(memory_format=torch.channels_last):
         warnings.warn(
-            f"Cannot do a zero-copy NCHW to NHWC. Performing explicit transpose...\nx.shape = {x.shape}, x.stride() = {x.stride()}"
+            f"Cannot do a zero-copy NCHW to NHWC. Performing explicit transpose...\nx.shape = {x.shape}, x.stride() = {x.stride()}",
+            category=UserWarning,
         )
         x = x.to(memory_format=torch.channels_last)
     if x.dim() != 4:
@@ -408,7 +415,8 @@ def NoCopyNHWC2NCHW(x: torch.Tensor):
     """
     if not x.is_contiguous(memory_format=torch.contiguous_format):
         warnings.warn(
-            "Cannot do a zero-copy NHWC to NCHW. Performing explicit transpose..."
+            "Cannot do a zero-copy NHWC to NCHW. Performing explicit transpose...",
+            category=UserWarning,
         )
         x = x.to(memory_format=torch.contiguous_format)
     if x.dim() != 4:
@@ -497,8 +505,8 @@ class Conv2dHealpix(torch.nn.Module):
         )
         x = x.permute(0, 1, 4, 2, 3)  # channels_last N F C H W
         # TODO: Add torch.compile for indexing backend
-        with pad_backend(self.padding_backend):
-            x = healpix_pad(x, padding)
+        # with pad_backend(self.padding_backend):
+        x = healpix_pad(x, padding)
         x = x.permute(0, 1, 3, 4, 2)  # N F H W C
         # No transpose reshape
         x = einops.rearrange(x, "(b t) f x y c -> (b t f) x y c", b=B, t=T, f=F, c=C)
@@ -510,13 +518,17 @@ class Conv2dHealpix(torch.nn.Module):
         Args:
             x: [b, c, t, x] shaped tensor, ideally channels last format
         """
-        w = self.weight.to(x.dtype) if self.weight is not None else None
-        b = self.bias.to(x.dtype) if self.bias is not None else None
-        f = (
-            self.resample_filter.to(x.dtype)
-            if self.resample_filter is not None
-            else None
-        )
+        weight, bias, resample_filter = self.weight, self.bias, self.resample_filter
+        if self.weight is not None and self.weight.dtype != x.dtype:
+            weight = self.weight.to(x.dtype)
+        if self.bias is not None and self.bias.dtype != x.dtype:
+            bias = self.bias.to(x.dtype)
+        if self.resample_filter is not None and self.resample_filter.dtype != x.dtype:
+            resample_filter = self.resample_filter.to(x.dtype)
+
+        w = weight if weight is not None else None
+        b = bias if bias is not None else None
+        f = resample_filter if resample_filter is not None else None
         w_pad = w.shape[-1] // 2 if w is not None else 0
         f_pad = (f.shape[-1] - 1) // 2 if f is not None else 0
 
@@ -636,14 +648,30 @@ class Attention(torch.nn.Module):
         self.num_heads = num_heads
 
     def forward(self, x):
+        x1 = self.qkv(self.norm2(x))
+
+        # # NOTE: V1.0.1 implementation
+        # q, k, v = x1.reshape(
+        #     x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1
+        # ).unbind(2)
+        # w = AttentionOp.apply(q, k)
+        # attn = torch.einsum("nqk,nck->ncq", w, v)
+
         q, k, v = (
-            self.qkv(self.norm2(x))
-            .reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1)
-            .unbind(2)
+            (
+                x1.reshape(
+                    x.shape[0], self.num_heads, x.shape[1] // self.num_heads, 3, -1
+                )
+            )
+            .permute(0, 1, 4, 3, 2)
+            .unbind(-2)
         )
-        w = AttentionOp.apply(q, k)
-        a = torch.matmul(v, w.mT)
-        x = self.proj(a.reshape(*x.shape)).add_(x)
+        attn = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, scale=1 / math.sqrt(k.shape[-1])
+        )
+        attn = attn.transpose(-1, -2)
+
+        x = self.proj(attn.reshape(*x.shape)).add_(x)
         return x
 
 
@@ -932,8 +960,8 @@ class TemporalAttention(torch.nn.Module):
         self.seq_length = seq_length
 
     def forward(self, x):
-        dtype = x.dtype
-        x = x.float()
+        # dtype = x.dtype
+        # x = x.float()
         qkv = self.qkv(self.norm2(x))
         q, k, v = einops.rearrange(
             qkv, "b (n heads c) t x -> n (b x) heads t c", n=3, heads=self.num_heads
@@ -950,7 +978,8 @@ class TemporalAttention(torch.nn.Module):
         w = w.softmax(-1)
         out = torch.einsum("bhqk,bhkc->b h c q", w, v)
         out = einops.rearrange(out, "(b x) h c t -> b (h c) t x", x=x.shape[-1])
-        return self.proj(out).to(dtype)
+        # return self.proj(out).to(dtype)
+        return self.proj(out)
 
 
 @dataclass
@@ -1342,7 +1371,17 @@ class SongUNet(torch.nn.Module):
         if self.embed_calendar:
             inputs.append(self.embed_calendar(day_of_year, second_of_day))
 
-        return torch.cat(inputs, dim=1)
+        inputs = [inp.to(x.dtype) if inp.dtype != x.dtype else inp for inp in inputs]
+        mf = (
+            torch.channels_last
+            if x.is_contiguous(memory_format=torch.channels_last)
+            else torch.contiguous_format
+        )
+
+        res = torch.cat(inputs, dim=1)
+
+        res = res.to(dtype=x.dtype).contiguous(memory_format=mf)
+        return res
 
     def forward(
         self,
@@ -1354,7 +1393,6 @@ class SongUNet(torch.nn.Module):
         second_of_day=None,
         position_embedding=None,  # local positional embedding with shape [B, C_embd, N, N], matching the shape of x except for the channel dimension
     ) -> Output:
-        torch.cuda.nvtx.range_push("SongUNet:forward")
         # if patched, concat local position_embedding to input
         if self.patched and self.add_spatial_embedding:
             x = torch.cat((x, position_embedding), dim=1)
@@ -1379,7 +1417,6 @@ class SongUNet(torch.nn.Module):
 
         emb = silu(self.map_layer0(emb))
         emb = silu(self.map_layer1(emb))
-
         # position embedding
         # Encoder.
         skips = []
@@ -1424,7 +1461,6 @@ class SongUNet(torch.nn.Module):
                     skip = skips.pop()
                     x = torch.cat([x, skip], dim=1)
                 x = block(x, emb)
-        torch.cuda.nvtx.range_pop()
         return Output(aux, classifier_out)
 
     def init_pos_embed_sinusoid(self):

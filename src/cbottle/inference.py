@@ -33,6 +33,7 @@ from . import checkpointing, patchify
 from .diffusion_samplers import (
     edm_sampler,
     edm_sampler_from_sigma,
+    edm_sampler_from_sigma_euler,
     edm_sampler_steps,
     StackedRandomGenerator,
 )
@@ -79,6 +80,8 @@ class CBottle3d:
         sigma_min: float = 0.02,
         sigma_max: float = 200.0,
         num_steps: int = 18,
+        sampler_fn: str = "heun",
+        channels_last: bool = True,
     ):
         """
         Initialize the CBottle3d model.
@@ -89,12 +92,27 @@ class CBottle3d:
             sigma_min: Minimum noise sigma for diffusion
             sigma_max: Maximum noise sigma for diffusion
             num_steps: Number of sampling steps
+            sampler_fn: Which sampler to use
+            channels_last: Whether to convert input and model to channels_last
         """
         self.net = net
         self.separate_classifier = separate_classifier
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
         self.num_steps = num_steps
+        self._sampler = self._get_sampler(sampler_fn)
+        self.channels_last = channels_last
+        self._convert_model_NHWC()
+
+    def _convert_model_NHWC(self):
+        if self.channels_last:
+            self.net = self.net.to(memory_format=torch.channels_last)
+
+    def _get_sampler(self, sampler_fn):
+        if sampler_fn == "heun":
+            return edm_sampler_from_sigma
+        elif sampler_fn == "euler":
+            return edm_sampler_from_sigma_euler
 
     @classmethod
     def from_pretrained(
@@ -443,6 +461,10 @@ class CBottle3d:
                 device=device,
             )
 
+            if self.channels_last:
+                latents = latents.to(memory_format=torch.channels_last)
+                condition = condition.to(memory_format=torch.channels_last)
+
             if start_from_noisy_image:
                 xT = latents * self.sigma_max + images
             else:
@@ -459,6 +481,11 @@ class CBottle3d:
                     (batch_size, 1, 1, *self.classifier_grid.shape),
                     torch.nan,
                     device=device,
+                    memory_format=(
+                        torch.channels_last
+                        if self.channels_last
+                        else torch.contiguous_format
+                    ),
                 )
                 guidance_data[:, :, :, guidance_pixels] = 1
             else:
@@ -524,7 +551,7 @@ class CBottle3d:
             D.sigma_min = self.net.sigma_min
 
             with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
-                out = edm_sampler_from_sigma(
+                out = self._sampler(
                     D,
                     xT,
                     randn_like=torch.randn_like,
