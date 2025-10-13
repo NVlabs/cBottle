@@ -44,7 +44,6 @@ from cbottle.models.embedding import (
     PositionalEmbedding,
 )
 
-import math
 
 if torch.cuda.is_available():
     try:
