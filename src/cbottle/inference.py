@@ -389,11 +389,12 @@ class CBottle3d:
         Unpost-process the output by normalizing.
         """
         info = self.batch_info
-        scales = info.scales
-        center = info.center
-        x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
-            :, None, None
-        ].to(x)
+        if info.scales is not None and info.center is not None:
+            scales = info.scales
+            center = info.center
+            x = (x - torch.tensor(center)[:, None, None].to(x)) / torch.tensor(scales)[
+                :, None, None
+            ].to(x)
         return x
 
     def _reorder(self, x: torch.Tensor) -> torch.Tensor:
