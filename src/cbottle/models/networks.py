@@ -32,7 +32,7 @@ from earth2grid.healpix import (
     Grid,
     PaddingBackends,
     PixelOrder,
-    pad_backend,
+    # pad_backend,
 )
 from earth2grid.healpix import pad as healpix_pad
 from torch.nn.functional import silu
