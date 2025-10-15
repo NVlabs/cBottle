@@ -80,7 +80,7 @@ class CBottle3d:
         sigma_min: float = 0.02,
         sigma_max: float = 200.0,
         num_steps: int = 18,
-        sampler_fn: str = "heun",
+        time_stepper: Literal["heun", "euler"] = "heun",
         channels_last: bool = True,
     ):
         """
@@ -92,7 +92,7 @@ class CBottle3d:
             sigma_min: Minimum noise sigma for diffusion
             sigma_max: Maximum noise sigma for diffusion
             num_steps: Number of sampling steps
-            sampler_fn: Which sampler to use
+            time_stepper: Which time stepper to use (heun, euler)
             channels_last: Whether to convert input and model to channels_last
         """
         self.net = net
@@ -100,7 +100,7 @@ class CBottle3d:
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
         self.num_steps = num_steps
-        self.sampler_fn = sampler_fn
+        self.time_stepper = time_stepper
         self.channels_last = channels_last
         self._convert_model_NHWC()
 
@@ -201,6 +201,11 @@ class CBottle3d:
         condition = batch["condition"]
         second_of_day = batch["second_of_day"]
         day_of_year = batch["day_of_year"]
+    
+        if self.channels_last:
+            condition = condition.to(memory_format=torch.channels_last)
+            if images.dim() == 4:
+                images = images.to(memory_format=torch.channels_last)
 
         # Post-process the original images for return
         original_processed = self._post_process(images)
@@ -273,6 +278,12 @@ class CBottle3d:
         images, labels, condition = batch["target"], batch["labels"], batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
+        
+        if self.channels_last:
+            condition = condition.to(memory_format=torch.channels_last)
+            if images.dim() == 4:
+                images = images.to(memory_format=torch.channels_last)
+        
         mask = ~torch.isnan(images)
 
         y0 = images + torch.randn_like(images) * self.sigma_min
@@ -321,6 +332,11 @@ class CBottle3d:
         condition = batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
+        
+        if self.channels_last:
+            condition = condition.to(memory_format=torch.channels_last)
+            if images.dim() == 4:
+                images = images.to(memory_format=torch.channels_last)
 
         labels_when_nan = torch.zeros_like(batch["labels"].to(images.device))
         labels_when_nan[:, LABELS.index(dataset_when_nan)] = 1.0
@@ -482,6 +498,8 @@ class CBottle3d:
             if self.channels_last:
                 latents = latents.to(memory_format=torch.channels_last)
                 condition = condition.to(memory_format=torch.channels_last)
+                if images.dim() == 4:
+                    images = images.to(memory_format=torch.channels_last)
 
             if start_from_noisy_image:
                 xT = latents * self.sigma_max + images
@@ -573,7 +591,7 @@ class CBottle3d:
                         self.sigma_max
                     ),  # Convert to int for type compatibility
                     num_steps=self.num_steps,
-                    sampler_fn=self.sampler_fn,
+                    time_stepper=self.time_stepper,
                 )
 
             out = self._post_process(out)

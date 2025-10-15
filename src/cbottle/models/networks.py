@@ -97,12 +97,12 @@ class Linear(torch.nn.Module):
 
     def forward(self, x):
         weight, bias = self.weight, self.bias
-        if self.weight is not None and self.weight.dtype != x.dtype:
-            weight = self.weight.to(x.dtype)
-        if self.bias is not None and self.bias.dtype != x.dtype:
-            bias = self.bias.to(x.dtype)
+        if weight is not None and weight.dtype != x.dtype:
+            weight = weight.to(x.dtype)
+        if bias is not None and bias.dtype != x.dtype:
+            bias = bias.to(x.dtype)
         x = x @ weight.t()
-        if self.bias is not None:
+        if bias is not None:
             x = x.add_(bias)
         return x
 
@@ -154,13 +154,17 @@ class Conv2d(torch.nn.Module):
         self.register_buffer("resample_filter", f if up or down else None)
 
     def forward(self, x):
-        w = self.weight.to(x.dtype) if self.weight is not None else None
-        b = self.bias.to(x.dtype) if self.bias is not None else None
-        f = (
-            self.resample_filter.to(x.dtype)
-            if self.resample_filter is not None
-            else None
-        )
+        weight, bias, resample_filter = self.weight, self.bias, self.resample_filter
+        if weight is not None and weight.dtype != x.dtype:
+            weight = weight.to(x.dtype)
+        if bias is not None and bias.dtype != x.dtype:
+            bias = bias.to(x.dtype)
+        if resample_filter is not None and resample_filter.dtype != x.dtype:
+            resample_filter = resample_filter.to(x.dtype)
+
+        w, b, f = weight, bias, resample_filter
+        w_pad = w.shape[-1] // 2 if w is not None else 0
+        f_pad = (f.shape[-1] - 1) // 2 if f is not None else 0
         w_pad = w.shape[-1] // 2 if w is not None else 0
         f_pad = (f.shape[-1] - 1) // 2 if f is not None else 0
 
@@ -520,16 +524,14 @@ class Conv2dHealpix(torch.nn.Module):
             x: [b, c, t, x] shaped tensor, ideally channels last format
         """
         weight, bias, resample_filter = self.weight, self.bias, self.resample_filter
-        if self.weight is not None and self.weight.dtype != x.dtype:
-            weight = self.weight.to(x.dtype)
-        if self.bias is not None and self.bias.dtype != x.dtype:
-            bias = self.bias.to(x.dtype)
-        if self.resample_filter is not None and self.resample_filter.dtype != x.dtype:
-            resample_filter = self.resample_filter.to(x.dtype)
+        if weight is not None and weight.dtype != x.dtype:
+            weight = weight.to(x.dtype)
+        if bias is not None and bias.dtype != x.dtype:
+            bias = bias.to(x.dtype)
+        if resample_filter is not None and resample_filter.dtype != x.dtype:
+            resample_filter = resample_filter.to(x.dtype)
 
-        w = weight if weight is not None else None
-        b = bias if bias is not None else None
-        f = resample_filter if resample_filter is not None else None
+        w, b, f = weight, bias, resample_filter
         w_pad = w.shape[-1] // 2 if w is not None else 0
         f_pad = (f.shape[-1] - 1) // 2 if f is not None else 0
 
