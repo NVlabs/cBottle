@@ -17,6 +17,7 @@ import torch
 import einops
 import earth2grid
 import math
+from typing import Optional
 
 
 def patch_index_from_bounding_box(order, box, patch_size, overlap_size, device="cuda"):
@@ -108,6 +109,7 @@ def apply_on_patches(
     pbar=None,
     global_lr=None,
     inbox_patch_index=None,
+    window: Optional[torch.Tensor] = None,
     device="cuda",
 ):
     """
@@ -115,6 +117,7 @@ def apply_on_patches(
         denoise: used like this `out = denoise(patches, sigma)
         x_hat: Latent map, NEST convention
         x_lr: condition, NEST convention
+        window: Tensor of shape (1,1,patch_size,patch_size) that weights each pixel by proximity to patch boundary.
     """
     order = int(np.log2(np.sqrt(x_lr.shape[-1] // 12)))
     nside = 2**order
@@ -177,7 +180,75 @@ def apply_on_patches(
     if pbar is not None:
         pbar.update()
     # Un-merge batch dim of output
-    if patch_size:
+    if patch_size and (window is not None):
+        if window.shape[0] == 1:
+            window = window.tile((out.shape[0], out.shape[1], 1, 1))
+
+        out = einops.rearrange(
+            out * window,
+            "(n f cx cy) c x y -> n (f c x y) (cx cy)",
+            x=patch_size,
+            y=patch_size,
+            f=12,
+            cx=cx,
+            cy=cy,
+        )
+        weights = einops.rearrange(
+            window,
+            "(n f cx cy) c x y -> n (f c x y) (cx cy)",
+            x=patch_size,
+            y=patch_size,
+            f=12,
+            cx=cx,
+            cy=cy,
+        )
+
+        # Compute average of overlapping patches
+        weights = torch.nn.functional.fold(
+            weights,
+            (padded_patch_size, padded_patch_size),
+            (patch_size, patch_size),
+            stride=stride,
+        )
+        out = torch.nn.functional.fold(
+            out,
+            (padded_patch_size, padded_patch_size),
+            (patch_size, patch_size),
+            stride=stride,
+        )
+        out = out / weights
+
+        # Reshape again and discard padding
+        out = einops.rearrange(
+            out,
+            "n (f c) x y -> n f c x y",
+            f=12,
+        )
+        weights = einops.rearrange(
+            weights,
+            "n (f c) x y -> n f c x y",
+            f=12,
+        )
+        out = out[
+            ...,
+            overlap_size : nside + overlap_size,
+            overlap_size : nside + overlap_size,
+        ]
+        weights = weights[
+            ...,
+            overlap_size : nside + overlap_size,
+            overlap_size : nside + overlap_size,
+        ]
+
+        out_xy = einops.rearrange(
+            out,
+            "n f c x y -> n c (f x y)",
+            x=nside,
+            y=nside,
+            f=12,
+        )
+
+    elif patch_size:
         out = einops.rearrange(
             out,
             "(n f cx cy) c x y -> n (f c x y) (cx cy)",
