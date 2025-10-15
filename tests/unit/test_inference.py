@@ -27,7 +27,7 @@ from cbottle.models.networks import Output
 from cbottle.patchify import apply_on_patches
 
 
-def create_cbottle3d(separate_classifier=None, sampler_fn="heun", channels_last=True):
+def create_cbottle3d(separate_classifier=None, time_stepper="heun", channels_last=True):
     # Create a CBottle3d object with a simple network
     net = models.get_model(
         models.ModelConfigV1(model_channels=8, out_channels=3, label_dim=LABEL_DIM)
@@ -43,7 +43,7 @@ def create_cbottle3d(separate_classifier=None, sampler_fn="heun", channels_last=
         sigma_min=0.02,
         sigma_max=200.0,
         num_steps=2,
-        sampler_fn=sampler_fn,
+        time_stepper=time_stepper,
         channels_last=channels_last,
         separate_classifier=separate_classifier,
     )
@@ -187,11 +187,11 @@ class MockClassifier:
 separate_classifier = MockClassifier()
 
 
-@pytest.mark.parametrize("sampler_fn", ["heun", "euler"])
+@pytest.mark.parametrize("time_stepper", ["heun", "euler"])
 @pytest.mark.parametrize("channels_last", [True, False])
-def test_cbottle3d_sample(sampler_fn, channels_last):
+def test_cbottle3d_sample(time_stepper, channels_last):
     mock_cbottle3d = create_cbottle3d(
-        separate_classifier, sampler_fn=sampler_fn, channels_last=channels_last
+        separate_classifier, time_stepper=time_stepper, channels_last=channels_last
     )
     # Test the sample method
     batch = create_input_data((1, 3, 1, 12 * 64 * 64))
