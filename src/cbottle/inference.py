@@ -202,7 +202,7 @@ class CBottle3d:
         condition = batch["condition"]
         second_of_day = batch["second_of_day"]
         day_of_year = batch["day_of_year"]
-    
+
         if self.channels_last:
             condition = condition.to(memory_format=torch.channels_last)
             if images.dim() == 4:
@@ -279,12 +279,12 @@ class CBottle3d:
         images, labels, condition = batch["target"], batch["labels"], batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
-        
+
         if self.channels_last:
             condition = condition.to(memory_format=torch.channels_last)
             if images.dim() == 4:
                 images = images.to(memory_format=torch.channels_last)
-        
+
         mask = ~torch.isnan(images)
 
         y0 = images + torch.randn_like(images) * self.sigma_min
@@ -333,7 +333,7 @@ class CBottle3d:
         condition = batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
-        
+
         if self.channels_last:
             condition = condition.to(memory_format=torch.channels_last)
             if images.dim() == 4:
