@@ -165,8 +165,6 @@ class Conv2d(torch.nn.Module):
         w, b, f = weight, bias, resample_filter
         w_pad = w.shape[-1] // 2 if w is not None else 0
         f_pad = (f.shape[-1] - 1) // 2 if f is not None else 0
-        w_pad = w.shape[-1] // 2 if w is not None else 0
-        f_pad = (f.shape[-1] - 1) // 2 if f is not None else 0
 
         if self.up:
             x = torch.nn.functional.conv_transpose2d(
