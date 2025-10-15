@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pytest
 import torch
 from cbottle.inference import (
     CBottle3d,
@@ -23,7 +24,7 @@ from cbottle import models
 from cbottle.datasets.base import BatchInfo
 from cbottle.datasets.dataset_2d import MAX_CLASSES as LABEL_DIM
 from cbottle.models.networks import Output
-import pytest
+from cbottle.patchify import apply_on_patches
 
 
 def create_cbottle3d(separate_classifier=None, sampler_fn="heun", channels_last=True):
@@ -107,6 +108,8 @@ def create_distilled_super_resolution_model():
         patch_size=128,
         overlap_size=32,
         sigma_max=800,
+        window_function="KBD",
+        window_alpha=1,
         device="cuda",
     )
 
@@ -198,3 +201,59 @@ def test_cbottle3d_sample(sampler_fn, channels_last):
     assert output is not None
     assert coords is not None
     assert separate_classifier.is_called
+
+
+def test_apply_on_patches():
+    model = create_super_resolution_model()
+    x_hat = torch.randn(1, 3, 12 * 1024**2).cuda()
+    x_lr = torch.randn(1, 3, 12 * 1024**2).cuda().to(torch.float64)
+    t_hat = torch.tensor(0.3).cuda()
+    global_lr = torch.rand(1, 3, 128, 128).cuda()
+
+    out = apply_on_patches(
+        denoise=model.net,
+        patch_size=128,
+        overlap_size=32,
+        x_hat=x_hat,
+        x_lr=x_lr,
+        t_hat=t_hat,
+        class_labels=None,
+        batch_size=128,
+        global_lr=global_lr,
+        device="cuda",
+    )
+
+    assert out is not None and out.shape == (1, 3, 12 * 1024**2)
+
+
+def test_apply_on_patches_window():
+    model = create_distilled_super_resolution_model()
+    x_hat = torch.randn(1, 3, 12 * 1024**2).cuda()
+    x_lr = torch.randn(1, 3, 12 * 1024**2).cuda().to(torch.float64)
+    t_hat = torch.tensor(0.3).cuda()
+    global_lr = torch.rand(1, 3, 128, 128).cuda()
+
+    window = model._get_window_function(
+        patch_size=128,
+        window_alpha=1,
+        type="KBD",
+        dtype=torch.float32,
+        device="cuda",
+    )
+    window = window.reshape((1, 1, window.shape[0], window.shape[1]))
+
+    out = apply_on_patches(
+        denoise=model.net,
+        patch_size=128,
+        overlap_size=32,
+        x_hat=x_hat,
+        x_lr=x_lr,
+        t_hat=t_hat,
+        class_labels=None,
+        batch_size=128,
+        global_lr=global_lr,
+        window=window,
+        device="cuda",
+    )
+
+    assert out is not None and out.shape == (1, 3, 12 * 1024**2)
