@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pytest
 import torch
 from cbottle.inference import (
     CBottle3d,
@@ -26,7 +27,7 @@ from cbottle.models.networks import Output
 from cbottle.patchify import apply_on_patches
 
 
-def create_cbottle3d(separate_classifier=None):
+def create_cbottle3d(separate_classifier=None, time_stepper="heun", channels_last=True):
     # Create a CBottle3d object with a simple network
     net = models.get_model(
         models.ModelConfigV1(model_channels=8, out_channels=3, label_dim=LABEL_DIM)
@@ -42,6 +43,8 @@ def create_cbottle3d(separate_classifier=None):
         sigma_min=0.02,
         sigma_max=200.0,
         num_steps=2,
+        time_stepper=time_stepper,
+        channels_last=channels_last,
         separate_classifier=separate_classifier,
     )
 
@@ -184,8 +187,12 @@ class MockClassifier:
 separate_classifier = MockClassifier()
 
 
-def test_cbottle3d_sample():
-    mock_cbottle3d = create_cbottle3d(separate_classifier)
+@pytest.mark.parametrize("time_stepper", ["heun", "euler"])
+@pytest.mark.parametrize("channels_last", [True, False])
+def test_cbottle3d_sample(time_stepper, channels_last):
+    mock_cbottle3d = create_cbottle3d(
+        separate_classifier, time_stepper=time_stepper, channels_last=channels_last
+    )
     # Test the sample method
     batch = create_input_data((1, 3, 1, 12 * 64 * 64))
     output, coords = mock_cbottle3d.sample(
