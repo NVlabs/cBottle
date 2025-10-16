@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import importlib
 import inspect
 import warnings
+import _warnings
 from typing import Literal, Optional, Type
 
 import einops
@@ -52,7 +53,6 @@ if torch.cuda.is_available():
     except ImportError:
         ApexGroupNorm = None
 
-import warnings, _warnings
 import torch._dynamo as dynamo
 
 dynamo.config.reorderable_logging_functions.update({warnings.warn, _warnings.warn})
