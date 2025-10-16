@@ -662,7 +662,6 @@ class SuperResolutionModel(torch.nn.Module):
         self.overlap_size = overlap_size
         self.num_steps = num_steps
         self.sigma_max = sigma_max
-        self.device = device
 
         self.batch_info = batch_info
         self.net = net
