@@ -127,8 +127,11 @@ class CBottle3d:
 
     def _torch_compile(self):
         if self.torch_compile:
-            for i, expert in enumerate(self.net.experts):
-                self.net.experts[i] = torch.compile(expert)
+            if isinstance(self.net, MixtureOfExpertsDenoiser):
+                for i, expert in enumerate(self.net.experts):
+                    self.net.experts[i] = torch.compile(expert, fullgraph=True)
+            else:
+                self.net = torch.compile(self.net, fullgraph=True)
 
     def _convert_model_NHWC(self):
         if self.channels_last:
@@ -574,7 +577,6 @@ class CBottle3d:
                     ).out
                 else:
                     d2 = 0.0
-
                 d = out.out.where(mask, d2)
                 if guidance_data is not None and guidance_scale > 0:
                     if self.separate_classifier is not None:
@@ -593,11 +595,12 @@ class CBottle3d:
                     else:
                         # use the logits from the main model
                         pass
-
                     d_guide = cbottle.denoiser_factories.get_guidance(
                         guidance_data, out.logits, x_hat, d, t_hat
                     )
                     d = d + guidance_scale * d_guide
+                    if self.channels_last:
+                        d = d.to(memory_format=torch.channels_last)
 
                 return d
 
@@ -716,7 +719,7 @@ class SuperResolutionModel:
 
     def _torch_compile(self):
         if self.torch_compile:
-            self.net = torch.compile(self.net)
+            self.net = torch.compile(self.net, fullgraph=True)
 
     @classmethod
     def from_pretrained(cls, state_path: str, **kwargs):

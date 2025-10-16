@@ -26,8 +26,17 @@ from cbottle.datasets.dataset_2d import MAX_CLASSES as LABEL_DIM
 from cbottle.models.networks import Output
 from cbottle.patchify import apply_on_patches
 
+torch._dynamo.config.verbose = True  # Enable verbose logging
+torch._dynamo.config.suppress_errors = False  # Forces the error to show all details
+torch._logging.set_logs(recompiles=True, graph_breaks=True)
 
-def create_cbottle3d(separate_classifier=None, time_stepper="heun", channels_last=True):
+
+def create_cbottle3d(
+    separate_classifier=None,
+    time_stepper="heun",
+    channels_last=True,
+    torch_compile=False,
+):
     # Create a CBottle3d object with a simple network
     net = models.get_model(
         models.ModelConfigV1(model_channels=8, out_channels=3, label_dim=LABEL_DIM)
@@ -46,10 +55,11 @@ def create_cbottle3d(separate_classifier=None, time_stepper="heun", channels_las
         time_stepper=time_stepper,
         channels_last=channels_last,
         separate_classifier=separate_classifier,
+        torch_compile=torch_compile,
     )
 
 
-def create_super_resolution_model():
+def create_super_resolution_model(torch_compile=False):
     # Create a SuperResolutionModel object with a simple network
     batch_info = BatchInfo(
         channels=["rlut", "rsut", "rsds"],
@@ -77,11 +87,12 @@ def create_super_resolution_model():
         overlap_size=32,
         num_steps=2,
         sigma_max=800,
+        torch_compile=torch_compile,
         device="cuda",
     )
 
 
-def create_distilled_super_resolution_model():
+def create_distilled_super_resolution_model(torch_compile=False):
     # Create a SuperResolutionModel object with a simple network
     batch_info = BatchInfo(
         channels=["rlut", "rsut", "rsds"],
@@ -110,6 +121,7 @@ def create_distilled_super_resolution_model():
         sigma_max=800,
         window_function="KBD",
         window_alpha=1,
+        torch_compile=torch_compile,
         device="cuda",
     )
 
@@ -257,3 +269,63 @@ def test_apply_on_patches_window():
     )
 
     assert out is not None and out.shape == (1, 3, 12 * 1024**2)
+
+
+@pytest.mark.parametrize("time_stepper", ["heun", "euler"])
+@pytest.mark.parametrize("channels_last", [True, False])
+def test_cbottle3d_sample_torch_compile(
+    time_stepper, channels_last, torch_compile=True
+):
+    retval = True
+    torch._dynamo.reset()
+    # Allow recompiles since edm sampler will cast data to float64
+    torch._dynamo.config.error_on_recompile = False
+    mock_cbottle3d = create_cbottle3d(
+        separate_classifier,
+        time_stepper=time_stepper,
+        channels_last=channels_last,
+        torch_compile=torch_compile,
+    )
+    # Test the sample method
+    batch = create_input_data((1, 3, 1, 12 * 64 * 64))
+    try:
+        _ = mock_cbottle3d.sample(batch, guidance_pixels=torch.tensor([0]).cuda())
+    except Exception:
+        retval = False
+    assert retval
+
+
+def test_super_resolution_model_call_torch_compile(torch_compile=True):
+    retval = True
+    torch._dynamo.reset()
+    # Allow recompiles since edm sampler will cast data to float64
+    torch._dynamo.config.error_on_recompile = False
+    model = create_super_resolution_model(torch_compile=torch_compile)
+    # Test the __call__ method
+    low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
+    coords = model.batch_info
+    extents = (0, 5, 0, 5)
+    coords = Coords(model.batch_info, model.low_res_grid)
+    try:
+        _ = model(low_res_tensor, coords, extents)
+    except Exception:
+        retval = False
+    assert retval
+
+
+def test_distilled_super_resolution_model_call_torch_compile(torch_compile=True):
+    retval = True
+    torch._dynamo.reset()
+    # Allow recompiles since edm sampler will cast data to float64
+    torch._dynamo.config.error_on_recompile = False
+    model = create_distilled_super_resolution_model(torch_compile=torch_compile)
+    # Test the __call__ method
+    low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
+    coords = model.batch_info
+    extents = (0, 5, 0, 5)
+    coords = Coords(model.batch_info, model.low_res_grid)
+    try:
+        _ = model(low_res_tensor, coords, extents)
+    except Exception:
+        retval = False
+    assert retval
