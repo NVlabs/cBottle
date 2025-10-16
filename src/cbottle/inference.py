@@ -58,22 +58,6 @@ def _build_labels(labels, denoiser_when_nan: str):
     return out_labels
 
 
-def reset_torch_compile_cache():
-    """
-    Clear all torch.compile compilation caches.
-
-    Call this function once at the beginning of your session, before creating
-    any compiled models, especially if you're modifying compilation logic.
-
-    Example:
-        >>> import cbottle.inference as cbi
-        >>> cbi.reset_torch_compile_cache()  # Call once per session
-        >>> model1 = cbi.CBottle3d.from_pretrained(..., torch_compile=True)
-        >>> model2 = cbi.SuperResolutionModel.from_pretrained(..., torch_compile=True)
-    """
-    torch._dynamo.reset()
-
-
 class CBottle3d:
     """
     A callable object that provides both infilling and ERA5-to-ICON translation using diffusion models.

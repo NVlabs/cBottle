@@ -157,6 +157,7 @@ def test_cbottle3d_translate():
 
 def test_super_resolution_model_call():
     model = create_super_resolution_model()
+    model.torch_compile()
     # Test the __call__ method
     low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
     coords = model.batch_info
@@ -169,6 +170,7 @@ def test_super_resolution_model_call():
 
 def test_distilled_super_resolution_model_call():
     model = create_distilled_super_resolution_model()
+    model.torch_compile()
     # Test the __call__ method
     low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
     coords = model.batch_info
@@ -201,6 +203,7 @@ def test_cbottle3d_sample(time_stepper, channels_last):
     mock_cbottle3d = create_cbottle3d(
         separate_classifier, time_stepper=time_stepper, channels_last=channels_last
     )
+    mock_cbottle3d.torch_compile()
     # Test the sample method
     batch = create_input_data((1, 3, 1, 12 * 64 * 64))
     output, coords = mock_cbottle3d.sample(
@@ -265,63 +268,3 @@ def test_apply_on_patches_window():
     )
 
     assert out is not None and out.shape == (1, 3, 12 * 1024**2)
-
-
-@pytest.mark.parametrize("time_stepper", ["heun", "euler"])
-@pytest.mark.parametrize("channels_last", [True, False])
-def test_cbottle3d_sample_torch_compile(
-    time_stepper, channels_last, torch_compile=True
-):
-    retval = True
-    torch._dynamo.reset()
-    # Allow recompiles since edm sampler will cast data to float64
-    torch._dynamo.config.error_on_recompile = False
-    mock_cbottle3d = create_cbottle3d(
-        separate_classifier,
-        time_stepper=time_stepper,
-        channels_last=channels_last,
-        torch_compile=torch_compile,
-    )
-    # Test the sample method
-    batch = create_input_data((1, 3, 1, 12 * 64 * 64))
-    try:
-        _ = mock_cbottle3d.sample(batch, guidance_pixels=torch.tensor([0]).cuda())
-    except Exception:
-        retval = False
-    assert retval
-
-
-def test_super_resolution_model_call_torch_compile(torch_compile=True):
-    retval = True
-    torch._dynamo.reset()
-    # Allow recompiles since edm sampler will cast data to float64
-    torch._dynamo.config.error_on_recompile = False
-    model = create_super_resolution_model(torch_compile=torch_compile)
-    # Test the __call__ method
-    low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
-    coords = model.batch_info
-    extents = (0, 5, 0, 5)
-    coords = Coords(model.batch_info, model.low_res_grid)
-    try:
-        _ = model(low_res_tensor, coords, extents)
-    except Exception:
-        retval = False
-    assert retval
-
-
-def test_distilled_super_resolution_model_call_torch_compile(torch_compile=True):
-    retval = True
-    torch._dynamo.reset()
-    # Allow recompiles since edm sampler will cast data to float64
-    torch._dynamo.config.error_on_recompile = False
-    model = create_distilled_super_resolution_model(torch_compile=torch_compile)
-    # Test the __call__ method
-    low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
-    coords = model.batch_info
-    extents = (0, 5, 0, 5)
-    coords = Coords(model.batch_info, model.low_res_grid)
-    try:
-        _ = model(low_res_tensor, coords, extents)
-    except Exception:
-        retval = False
-    assert retval
