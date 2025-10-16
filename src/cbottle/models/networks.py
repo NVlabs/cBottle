@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import importlib
 import inspect
 import warnings
+import _warnings
 from typing import Literal, Optional, Type
 
 import einops
@@ -51,6 +52,11 @@ if torch.cuda.is_available():
         ApexGroupNorm = getattr(apex_gn_module, "GroupNorm")
     except ImportError:
         ApexGroupNorm = None
+
+import torch._dynamo as dynamo
+
+dynamo.config.reorderable_logging_functions.update({warnings.warn, _warnings.warn})
+
 
 # ----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
@@ -1401,6 +1407,7 @@ class SongUNet(torch.nn.Module):
 
         emb = silu(self.map_layer0(emb))
         emb = silu(self.map_layer1(emb))
+
         # position embedding
         # Encoder.
         skips = []
@@ -1558,7 +1565,13 @@ class EDMPrecond(torch.nn.Module):
         else:
             condition = condition.to(torch.float32).to(x.device)
             condition = torch.nan_to_num(condition, nan=0.0)
-            arg = torch.cat([c_in * x, condition], dim=1)
+            arg = torch.cat([c_in * x, condition], dim=1).contiguous(
+                memory_format=(
+                    torch.channels_last
+                    if x.is_contiguous(memory_format=torch.channels_last)
+                    else torch.contiguous_format
+                )
+            )
 
         out = self.model(
             arg.to(dtype),

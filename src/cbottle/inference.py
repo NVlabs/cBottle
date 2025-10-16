@@ -83,6 +83,7 @@ class CBottle3d:
         num_steps: int = 18,
         time_stepper: Literal["heun", "euler"] = "heun",
         channels_last: bool = True,
+        torch_compile: bool = False,
     ):
         """
         Initialize the CBottle3d model.
@@ -95,6 +96,7 @@ class CBottle3d:
             num_steps: Number of sampling steps
             time_stepper: Which time stepper to use (heun, euler)
             channels_last: Whether to convert input and model to channels_last
+            torch_compile: Whether to compile the model with torch.compile
         """
         self.net = net
         self.separate_classifier = separate_classifier
@@ -104,6 +106,15 @@ class CBottle3d:
         self.time_stepper = time_stepper
         self.channels_last = channels_last
         self._convert_model_NHWC()
+        if torch_compile:
+            self.torch_compile()
+
+    def torch_compile(self):
+        if isinstance(self.net, MixtureOfExpertsDenoiser):
+            for i, expert in enumerate(self.net.experts):
+                self.net.experts[i] = torch.compile(expert, fullgraph=True)
+        else:
+            self.net = torch.compile(self.net, fullgraph=True)
 
     def _convert_model_NHWC(self):
         if self.channels_last:
@@ -549,7 +560,6 @@ class CBottle3d:
                     ).out
                 else:
                     d2 = 0.0
-
                 d = out.out.where(mask, d2)
                 if guidance_data is not None and guidance_scale > 0:
                     if self.separate_classifier is not None:
@@ -568,11 +578,12 @@ class CBottle3d:
                     else:
                         # use the logits from the main model
                         pass
-
                     d_guide = cbottle.denoiser_factories.get_guidance(
                         guidance_data, out.logits, x_hat, d, t_hat
                     )
                     d = d + guidance_scale * d_guide
+                    if self.channels_last:
+                        d = d.to(memory_format=torch.channels_last)
 
                 return d
 
@@ -640,6 +651,7 @@ class SuperResolutionModel:
         overlap_size: int = 32,
         num_steps: int = 18,
         sigma_max: int = 800,
+        torch_compile: bool = False,
         device: str = "cuda",
     ):
         """
@@ -653,6 +665,7 @@ class SuperResolutionModel:
             overlap_size: Overlapping pixel number between patches
             num_steps: Sampler iteration number
             sigma_max: Noise sigma max
+            torch_compile: Whether to compile the model with torch.compile
             device: Device to run inference on
         """
         self.hpx_level = hpx_level
@@ -665,6 +678,8 @@ class SuperResolutionModel:
 
         self.batch_info = batch_info
         self.net = net
+        if torch_compile:
+            self.torch_compile()
 
         self.net.eval().requires_grad_(False).to(device)
 
@@ -684,6 +699,9 @@ class SuperResolutionModel:
         ).to(device)
         self.regrid = earth2grid.get_regridder(self.low_res_grid, self.high_res_grid)
         self.regrid.to(device).float()
+
+    def torch_compile(self):
+        self.net = torch.compile(self.net, fullgraph=True)
 
     @classmethod
     def from_pretrained(cls, state_path: str, **kwargs):
@@ -916,6 +934,7 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
         overlap_size: int = 32,
         num_steps: int = 18,
         sigma_max: int = 800,
+        torch_compile: bool = False,
         window_function: str = "KBD",
         window_alpha: int = 1,
         device: str = "cuda",
@@ -929,6 +948,7 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
             overlap_size=overlap_size,
             num_steps=num_steps,
             sigma_max=sigma_max,
+            torch_compile=torch_compile,
             device=device,
         )
         window = self._get_window_function(

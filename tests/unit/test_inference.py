@@ -27,7 +27,12 @@ from cbottle.models.networks import Output
 from cbottle.patchify import apply_on_patches
 
 
-def create_cbottle3d(separate_classifier=None, time_stepper="heun", channels_last=True):
+def create_cbottle3d(
+    separate_classifier=None,
+    time_stepper="heun",
+    channels_last=True,
+    torch_compile=False,
+):
     # Create a CBottle3d object with a simple network
     net = models.get_model(
         models.ModelConfigV1(model_channels=8, out_channels=3, label_dim=LABEL_DIM)
@@ -46,10 +51,11 @@ def create_cbottle3d(separate_classifier=None, time_stepper="heun", channels_las
         time_stepper=time_stepper,
         channels_last=channels_last,
         separate_classifier=separate_classifier,
+        torch_compile=torch_compile,
     )
 
 
-def create_super_resolution_model():
+def create_super_resolution_model(torch_compile=False):
     # Create a SuperResolutionModel object with a simple network
     batch_info = BatchInfo(
         channels=["rlut", "rsut", "rsds"],
@@ -77,11 +83,12 @@ def create_super_resolution_model():
         overlap_size=32,
         num_steps=2,
         sigma_max=800,
+        torch_compile=torch_compile,
         device="cuda",
     )
 
 
-def create_distilled_super_resolution_model():
+def create_distilled_super_resolution_model(torch_compile=False):
     # Create a SuperResolutionModel object with a simple network
     batch_info = BatchInfo(
         channels=["rlut", "rsut", "rsds"],
@@ -110,6 +117,7 @@ def create_distilled_super_resolution_model():
         sigma_max=800,
         window_function="KBD",
         window_alpha=1,
+        torch_compile=torch_compile,
         device="cuda",
     )
 
@@ -149,6 +157,7 @@ def test_cbottle3d_translate():
 
 def test_super_resolution_model_call():
     model = create_super_resolution_model()
+    model.torch_compile()
     # Test the __call__ method
     low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
     coords = model.batch_info
@@ -161,6 +170,7 @@ def test_super_resolution_model_call():
 
 def test_distilled_super_resolution_model_call():
     model = create_distilled_super_resolution_model()
+    model.torch_compile()
     # Test the __call__ method
     low_res_tensor = torch.randn(1, 3, 1, 12 * 64**2).cuda()
     coords = model.batch_info
@@ -193,6 +203,7 @@ def test_cbottle3d_sample(time_stepper, channels_last):
     mock_cbottle3d = create_cbottle3d(
         separate_classifier, time_stepper=time_stepper, channels_last=channels_last
     )
+    mock_cbottle3d.torch_compile()
     # Test the sample method
     batch = create_input_data((1, 3, 1, 12 * 64 * 64))
     output, coords = mock_cbottle3d.sample(
