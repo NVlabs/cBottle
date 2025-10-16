@@ -1565,7 +1565,6 @@ class EDMPrecond(torch.nn.Module):
         else:
             condition = condition.to(torch.float32).to(x.device)
             condition = torch.nan_to_num(condition, nan=0.0)
-            # arg = torch.cat([c_in * x, condition], dim=1)
             arg = torch.cat([c_in * x, condition], dim=1).contiguous(
                 memory_format=(
                     torch.channels_last
