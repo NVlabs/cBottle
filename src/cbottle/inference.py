@@ -912,6 +912,7 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
         sigma_max: int = 800,
         window_function: str = "KBD",
         window_alpha: int = 1,
+        device: str = "cuda",
     ):
         super().__init__(
             net=net,
@@ -922,6 +923,7 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
             overlap_size=overlap_size,
             num_steps=num_steps,
             sigma_max=sigma_max,
+            device=device,
         )
         window = self._get_window_function(
             patch_size=patch_size,
