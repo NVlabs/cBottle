@@ -121,17 +121,16 @@ class CBottle3d:
         self.num_steps = num_steps
         self.time_stepper = time_stepper
         self.channels_last = channels_last
-        self.torch_compile = torch_compile
         self._convert_model_NHWC()
-        self._torch_compile()
+        if torch_compile:
+            self.torch_compile()
 
-    def _torch_compile(self):
-        if self.torch_compile:
-            if isinstance(self.net, MixtureOfExpertsDenoiser):
-                for i, expert in enumerate(self.net.experts):
-                    self.net.experts[i] = torch.compile(expert, fullgraph=True)
-            else:
-                self.net = torch.compile(self.net, fullgraph=True)
+    def torch_compile(self):
+        if isinstance(self.net, MixtureOfExpertsDenoiser):
+            for i, expert in enumerate(self.net.experts):
+                self.net.experts[i] = torch.compile(expert, fullgraph=True)
+        else:
+            self.net = torch.compile(self.net, fullgraph=True)
 
     def _convert_model_NHWC(self):
         if self.channels_last:
@@ -692,11 +691,11 @@ class SuperResolutionModel:
         self.num_steps = num_steps
         self.sigma_max = sigma_max
         self.device = device
-        self.torch_compile = torch_compile
 
         self.batch_info = batch_info
         self.net = net
-        self._torch_compile()
+        if torch_compile:
+            self.torch_compile()
 
         self.net.eval().requires_grad_(False).to(device)
 
@@ -717,9 +716,8 @@ class SuperResolutionModel:
         self.regrid = earth2grid.get_regridder(self.low_res_grid, self.high_res_grid)
         self.regrid.to(device).float()
 
-    def _torch_compile(self):
-        if self.torch_compile:
-            self.net = torch.compile(self.net, fullgraph=True)
+    def torch_compile(self):
+        self.net = torch.compile(self.net, fullgraph=True)
 
     @classmethod
     def from_pretrained(cls, state_path: str, **kwargs):
