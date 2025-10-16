@@ -26,10 +26,6 @@ from cbottle.datasets.dataset_2d import MAX_CLASSES as LABEL_DIM
 from cbottle.models.networks import Output
 from cbottle.patchify import apply_on_patches
 
-torch._dynamo.config.verbose = True  # Enable verbose logging
-torch._dynamo.config.suppress_errors = False  # Forces the error to show all details
-torch._logging.set_logs(recompiles=True, graph_breaks=True)
-
 
 def create_cbottle3d(
     separate_classifier=None,
