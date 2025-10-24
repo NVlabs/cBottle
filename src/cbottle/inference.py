@@ -634,7 +634,7 @@ class CBottle3d:
         return out, coords
 
 
-class SuperResolutionModel:
+class SuperResolutionModel(torch.nn.Module):
     """
     A callable object that performs super-resolution on low-resolution Healpix data.
 
@@ -668,20 +668,20 @@ class SuperResolutionModel:
             torch_compile: Whether to compile the model with torch.compile
             device: Device to run inference on
         """
+        super().__init__()
         self.hpx_level = hpx_level
         self.hpx_lr_level = hpx_lr_level
         self.patch_size = patch_size
         self.overlap_size = overlap_size
         self.num_steps = num_steps
         self.sigma_max = sigma_max
-        self.device = device
 
         self.batch_info = batch_info
         self.net = net
         if torch_compile:
             self.torch_compile()
 
-        self.net.eval().requires_grad_(False).to(device)
+        self.net.eval().requires_grad_(False)
 
         # Setup grids
         self.high_res_grid = healpix.Grid(
@@ -696,9 +696,8 @@ class SuperResolutionModel:
         lon = np.linspace(0, 360, 128)[None, :]
         self.regrid_to_latlon = self.low_res_grid.get_bilinear_regridder_to(
             lat, lon
-        ).to(device)
-        self.regrid = earth2grid.get_regridder(self.low_res_grid, self.high_res_grid)
-        self.regrid.to(device).float()
+        )
+        self.regrid = earth2grid.get_regridder(self.low_res_grid, self.high_res_grid).float()
 
     def torch_compile(self):
         self.net = torch.compile(self.net, fullgraph=True)
@@ -737,7 +736,7 @@ class SuperResolutionModel:
             batch_size=batch_size,
             global_lr=global_lr,
             inbox_patch_index=inbox_patch_index,
-            device=self.device,
+            device=x_hat.device,
         )
 
     def __call__(
@@ -772,7 +771,7 @@ class SuperResolutionModel:
                 current_super_resolution_box,
                 self.patch_size,
                 self.overlap_size,
-                self.device,
+                x.device,
             )
         else:
             inbox_patch_index = None
@@ -819,22 +818,21 @@ class SuperResolutionModel:
 
     def denormalize(self, x):
         # Denormalize output
+        # Ewwwww
         if self.batch_info.center is not None and self.batch_info.scales is not None:
             # Convert lists to tensors if necessary
             center = self.batch_info.center
             scales = self.batch_info.scales
 
-            center = torch.tensor(center, device="cpu")
-            scales = torch.tensor(scales, device="cpu")
+            center = torch.tensor(center, device=x.device)
+            scales = torch.tensor(scales, device=x.device)
 
             # Ensure proper broadcasting
             if center.dim() == 1:
                 center = center.view(-1, 1)  # (channels, 1)
             if scales.dim() == 1:
                 scales = scales.view(-1, 1)  # (channels, 1)
-            x = x.cpu() * scales + center
-        else:
-            x = x.cpu()
+            x = x * scales + center
         return x
 
     def _super_resolve_single_tensor(
@@ -853,19 +851,18 @@ class SuperResolutionModel:
         Returns:
             High-resolution tensor in NEST convention, shape (channels, npix_hr)
         """
-        # Ensure input is on the correct device
-        lr_tensor = lr_tensor.to(self.device)
 
         # Normalize input using batch info
+        # WHY WE DO THIS HERE? WHO KNOWS
         if self.batch_info.center is not None and self.batch_info.scales is not None:
             # Convert lists to tensors if necessary
             center = self.batch_info.center
             scales = self.batch_info.scales
 
             if isinstance(center, list):
-                center = torch.tensor(center, device=self.device)
+                center = torch.tensor(center, device=lr_tensor.device)
             if isinstance(scales, list):
-                scales = torch.tensor(scales, device=self.device)
+                scales = torch.tensor(scales, device=lr_tensor.device)
 
             # Ensure proper broadcasting
             if center.dim() == 1:
@@ -878,7 +875,7 @@ class SuperResolutionModel:
             lr_normalized = lr_tensor
 
         # Get global low resolution for lat-lon context
-        global_lr = self.regrid_to_latlon(lr_normalized.double())[None,].to(self.device)
+        global_lr = self.regrid_to_latlon(lr_normalized.double())[None,]
 
         # Regrid to high resolution
         lr_hr = self.regrid(lr_normalized)
@@ -886,12 +883,10 @@ class SuperResolutionModel:
         # Prepare tensors for diffusion
         in_channels = lr_hr.shape[0]
         latents = torch.randn_like(lr_hr)
-        latents = latents.reshape((in_channels, -1))
-        lr_hr = lr_hr.reshape((in_channels, -1))
-
         # Add batch dimension
-        latents = latents[None,].to(self.device)
-        lr_hr = lr_hr[None,].to(self.device)
+        latents = latents.reshape((in_channels, -1))[None,]
+        lr_hr = lr_hr.reshape((in_channels, -1))[None,]
+
         with torch.no_grad():
             # Define denoiser function
             def denoiser(x, t):
@@ -906,7 +901,6 @@ class SuperResolutionModel:
                         inbox_patch_index=inbox_patch_index,
                     )
                     .to(torch.float64)
-                    .to(self.device)
                 )
 
             # Set denoiser attributes
@@ -956,10 +950,9 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
             window_alpha=window_alpha,
             type=window_function,
             dtype=torch.float32,
-            device=device,
         )
         window = window.reshape((1, 1, window.shape[0], window.shape[1]))
-        self.window = window
+        self.register_buffer("window", window)
 
     def _get_window_function(self, patch_size, window_alpha, type="KBD", **kwargs):
         functions = {
@@ -998,7 +991,6 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
             global_lr=global_lr,
             inbox_patch_index=inbox_patch_index,
             window=self.window,
-            device=self.device,
         )
 
     def _sample(self, denoiser, latents):
