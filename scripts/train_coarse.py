@@ -550,13 +550,14 @@ class TrainingLoop(loop.TrainingLoopBase):
                             f"seasonal_cycle/{field}/{season}/truth",
                             ring_images[j, c, t] * b.scales[c] + b.center[c],
                         )
-            with torch.no_grad():
-                # Classifier validation
-                self.validate_classifier(images, net, batch)
-                loss = self.test_step(**batch)
-                training_stats.report("Loss/test_loss", loss)
+            with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
+                with torch.no_grad():
+                    # Classifier validation
+                    self.validate_classifier(images, net, batch)
+                    loss = self.test_step(**batch)
+                    training_stats.report("Loss/test_loss", loss)
 
-            self._report_log_likelihood(net, batch)
+                self._report_log_likelihood(net, batch)
 
         averages = finish()
         self.finish_sigma_by_loss_metrics()
