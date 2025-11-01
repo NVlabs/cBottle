@@ -128,10 +128,6 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
             )
         self.ema = copy.deepcopy(self.net).eval().requires_grad_(False)
 
-        # untrained net for loss by sigma diagnostics
-        self.untrained_net = self.get_network()
-        self.untrained_net.requires_grad_(False).eval().to(self.device)
-
     @cbottle.profiling.nvtx
     def log_tick(
         self,
@@ -492,6 +488,10 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         self.print_network_info(self.net, self.device)
         self.setup_batching()
         self.optimizer = self.get_optimizer(self.net.parameters())
+        self._state_checkpoint_handler = CheckpointHandler(self.run_dir)
+        self._snapshot_checkpoint_handler = CheckpointHandler(
+            self.run_dir, "network-snapshot-{}.checkpoint"
+        )
 
     def resume_from_rundir(self, run_dir=None, require_all=True):
         run_dir = run_dir or self.run_dir
