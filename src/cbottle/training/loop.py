@@ -298,7 +298,8 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                     indict = self._stage_tuple_batch(batch)
 
                 torch.cuda.nvtx.range_pop()
-                loss = self.train_step(**indict)
+                with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
+                    loss = self.train_step(**indict)
                 training_stats.report("Loss/loss", loss)
                 time_length = loss.shape[2]  # (b, c, t, x)
                 loss_mean = loss.sum().mul(

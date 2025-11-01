@@ -519,14 +519,15 @@ class TrainingLoop(loop.TrainingLoopBase):
             hpx = net.domain._grid
             ring_images = hpx.reorder(earth2grid.healpix.PixelOrder.RING, images)
 
-            d = sample_from_condition(
-                net,
-                batch,
-                batch_info=self.batch_info,
-                regression=self.regression,
-                sigma_max=self.sigma_max,
-                sigma_min=self.sigma_min,
-            )
+            with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
+                d = sample_from_condition(
+                    net,
+                    batch,
+                    batch_info=self.batch_info,
+                    regression=self.regression,
+                    sigma_max=self.sigma_max,
+                    sigma_min=self.sigma_min,
+                )
 
             time_length = self.time_length
 
