@@ -118,7 +118,7 @@ class TrainingLoop(loop.TrainingLoopBase):
 
     def setup_sigma_bins(self):
         # Loss by sigma metric
-        self._sigma_metric_bin_edges = torch.tensor([0, 0.1, 1, 10, 100, 1000])
+        self._sigma_metric_bin_edges = torch.tensor([0, 0.1, 1, 10, 100, 316, 1000])
         self._test_sigma_metric = BinnedAverage(self._sigma_metric_bin_edges).to(
             self.device
         )
