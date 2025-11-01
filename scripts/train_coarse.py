@@ -408,6 +408,13 @@ class TrainingLoop(loop.TrainingLoopBase):
 
     def _report_log_likelihood(self, net, batch):
         # likelihood
+        # log likelihood only requires grad wrt the input x
+        # can turn off grad wrt parameters to save memory
+        requires_grad_list = []
+        for param in net.parameters():
+            requires_grad_list.append(param.requires_grad)
+            param.requires_grad_(False)
+
         target = batch["target"]
         mask = ~torch.isnan(target)
         log_prob, _ = cbottle.likelihood.log_prob(
@@ -419,6 +426,9 @@ class TrainingLoop(loop.TrainingLoopBase):
             sigma_max=self.sigma_max,
             divergence_samples=1,
         )
+
+        for param, requires_grad in zip(net.parameters(), requires_grad_list):
+            param.requires_grad_(requires_grad)
 
         # Log data by label
         log_prob_per_dim = log_prob / mask.sum(dim=(1, 2, 3))  # n
