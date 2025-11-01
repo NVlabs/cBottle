@@ -27,6 +27,11 @@ class TrainingLoopBase:
     )
     ema_rampup_ratio: float = 0.05  # EMA ramp-up coefficient, None = no rampup.
     lr_rampup_img: int = 10_000_000  # Learning rate ramp-up duration.
+    lr_flat_imgs: int = 100_000_000
+    lr_decay_imgs: int = 0
+    lr_min: float = 1e-6
+    lr: float = 1e-4
+
     loss_scaling: float = 1.0  # Loss scaling factor for reducing FP16 under/overflows.
     gradient_clip_max_norm: Optional[float] = None
     total_ticks: int = 10
@@ -34,3 +39,4 @@ class TrainingLoopBase:
     snapshot_ticks: int = 50  # How often to save network snapshots, None = disable.
     state_dump_ticks: int = 500  # How often to dump training state, None = disable.
     cudnn_benchmark: bool = True  # Enable torch.backends.cudnn.benchmark?
+    bf16: bool = False  # Use bfloat16 for training.

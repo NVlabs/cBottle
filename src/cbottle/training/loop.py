@@ -21,6 +21,8 @@ import os
 import pickle
 import time
 import warnings
+import glob
+import math
 from functools import partial
 from typing import Iterable, Union
 
@@ -316,10 +318,37 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
     def step_optimizer(self, cur_nimg):
         # Update weights.
         torch.cuda.nvtx.range_push("training_loop:step")
+
+        warmup_imgs = self.lr_rampup_img
+        flat_imgs = self.lr_flat_imgs
+        decay_imgs = self.lr_decay_imgs
+        total_imgs = warmup_imgs + flat_imgs + decay_imgs
+
+        def lr_lambda(cur_nimg):
+            base_lr = self.lr
+            min_lr = self.lr_min
+
+            min_factor = min_lr / base_lr
+            if cur_nimg < warmup_imgs:
+                # linear ramp from 0 → 1
+                return float(cur_nimg) / warmup_imgs
+            elif cur_nimg < warmup_imgs + flat_imgs:
+                return 1.0
+            elif cur_nimg < total_imgs:
+                # cosine decay from 1 to min_factor
+                progress = float(cur_nimg - warmup_imgs - flat_imgs) / decay_imgs
+                return min_factor + 0.5 * (1.0 - min_factor) * (
+                    1.0 + math.cos(math.pi * progress)
+                )
+            else:
+                return min_factor
+
+        scale = lr_lambda(self.cur_nimg)
         for g in self.optimizer.param_groups:
-            lr = self.optimizer.defaults["lr"] * min(
-                cur_nimg / max(self.lr_rampup_img, 1e-8), 1
+            base_lr = g.setdefault(
+                "base_lr", g.get("lr", self.optimizer.defaults["lr"])
             )
+            lr = base_lr * scale
             g["lr"] = lr
             self.writer.add_scalar("lr", lr, global_step=self.cur_nimg)
         for param in self.net.parameters():

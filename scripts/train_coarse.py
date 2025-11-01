@@ -76,7 +76,6 @@ class TrainingLoop(loop.TrainingLoopBase):
     """
 
     regression: bool = False
-    lr: float = 0.0001
     valid_min_samples: int = 128
 
     # loss options
