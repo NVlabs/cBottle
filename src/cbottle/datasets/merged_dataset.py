@@ -39,13 +39,23 @@ class _MergedLoader:
 
 
 def _split(x, rank, world_size, drop_extra=True):
-    samples_per_rank = len(x) / world_size
-    rem = len(x) % world_size
-    if drop_extra and (rem > 0):
-        x = x[:-rem]
+    n = len(x)
+    base = n // world_size
+    rem = n % world_size
 
-    samples_per_rank = math.ceil(len(x) / world_size)
-    start = rank * samples_per_rank
+    if drop_extra:
+        samples_per_rank = base
+        x = x[: base * world_size]
+        start = rank * base
+    else:
+        # give the first rem ranks one extra sample
+        if rank < rem:
+            samples_per_rank = base + 1
+            start = rank * samples_per_rank
+        else:
+            samples_per_rank = base
+            start = rem * (base + 1) + (rank - rem) * base
+
     return x[start : start + samples_per_rank]
 
 
