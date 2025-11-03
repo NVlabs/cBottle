@@ -122,6 +122,8 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
     def _setup_networks(self):
         self.ddp = self.net = self.get_network()
         self.net.train().requires_grad_(True).to(self.device)
+        if self.channels_last:
+            self.net = self.net.to(memory_format=torch.channels_last)
         if dist.get_world_size() > 1:
             self.ddp = torch.nn.parallel.DistributedDataParallel(
                 self.net,
