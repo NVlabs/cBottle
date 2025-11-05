@@ -271,11 +271,6 @@ class TrainingLoop(loop.TrainingLoopBase):
         self._test_dataset = test_dataset
         return dataset, train_loader, test_loader
 
-    def compile_network(self):
-        # compile just the internal model for fewer recompiles as input dtypes into
-        # preconditioner change during sampling but are constant into the model
-        self.net.model = torch.compile(self.net.model, fullgraph=True)
-
     def _curry_net(self, net, batch):
         memory_format = (
             torch.channels_last if self.channels_last else torch.contiguous_format

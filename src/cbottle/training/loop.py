@@ -124,8 +124,11 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         self.net.train().requires_grad_(True).to(self.device)
         if self.channels_last:
             self.net = self.net.to(memory_format=torch.channels_last)
+        self.base_net = self.net
         if self.compile:
-            self.compile_network()
+            # Compiling must return a new object and not modify the original net.
+            # Need a reference to the original uncompiled net so parameter names are consistent in checkpointing.
+            self.net = self.compile_network(self.net)
         if dist.get_world_size() > 1:
             self.ddp = torch.nn.parallel.DistributedDataParallel(
                 self.net,
@@ -134,8 +137,9 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
             )
         self.ema = copy.deepcopy(self.net).eval().requires_grad_(False)
 
-    def compile_network(self):
-        self.net = torch.compile(self.net)
+    @staticmethod
+    def compile_network(net):
+        return torch.compile(net, fullgraph=True)
 
     @cbottle.profiling.nvtx
     def log_tick(
@@ -242,7 +246,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
     def _load_net_state(self, checkpoint, require_all):
         with checkpoint.open("net_state.pth", "r") as f:
             net_state = torch.load(f, weights_only=True, map_location="cpu")
-            self.net.load_state_dict(net_state, strict=require_all)
+            self.base_net.load_state_dict(net_state, strict=require_all)
 
     def _load_optimizer_state(self, checkpoint):
         with checkpoint.open("optimizer_state.pth", "r") as f:
@@ -522,9 +526,9 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         self.cur_nimg = 0
         self._setup_datasets()
         self._setup_networks()
-        self.print_network_info(self.net, self.device)
+        self.print_network_info(self.base_net, self.device)
         self.setup_batching()
-        self.optimizer = self.get_optimizer(self.net.parameters())
+        self.optimizer = self.get_optimizer(self.base_net.parameters())
         self._state_checkpoint_handler = CheckpointHandler(self.run_dir)
         self._snapshot_checkpoint_handler = CheckpointHandler(
             self.run_dir, "network-snapshot-{}.checkpoint"
