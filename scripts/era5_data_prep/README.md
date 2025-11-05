@@ -11,11 +11,11 @@ This will command will start a redis server in the background.
 To test of the server is available at the expected location install the redis-cli and run
 ```
 $ redis-cli -h your_host
-fb7510c-lcedt.dyn.nvidia.com:6379> SET hello "world"
+your_host:6379> SET hello "world"
 OK
-fb7510c-lcedt.dyn.nvidia.com:6379> GET hello
+your_host:6379> GET hello
 "world"
-fb7510c-lcedt.dyn.nvidia.com:6379>
+your_host:6379>
 ```
 This demonstrates redis's basic key-values store capability.
 
