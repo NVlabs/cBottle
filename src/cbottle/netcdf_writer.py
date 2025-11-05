@@ -150,7 +150,7 @@ class NetCDFWriter:
         timestamps: torch.Tensor,
         **kwargs,
     ):
-        out = coords.grid.reorder(self.pixel_order, target)
+        out = coords.grid.reorder(self.pixel_order, target.contiguous())
         output = {c: out[:, k] for k, c in enumerate(coords.batch_info.channels)}
         self.write_batch(output, timestamps, **kwargs)
 
