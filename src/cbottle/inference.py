@@ -84,6 +84,7 @@ class CBottle3d:
         time_stepper: Literal["heun", "euler"] = "heun",
         channels_last: bool = True,
         torch_compile: bool = False,
+        device: str | None = None,
     ):
         """
         Initialize the CBottle3d model.
@@ -97,6 +98,7 @@ class CBottle3d:
             time_stepper: Which time stepper to use (heun, euler)
             channels_last: Whether to convert input and model to channels_last
             torch_compile: Whether to compile the model with torch.compile
+            device: Device to move models to
         """
         self.net = net
         self.separate_classifier = separate_classifier
@@ -105,6 +107,7 @@ class CBottle3d:
         self.num_steps = num_steps
         self.time_stepper = time_stepper
         self.channels_last = channels_last
+        self._move_models_to_device(device)
         self._convert_model_NHWC()
         if torch_compile:
             self.torch_compile()
@@ -119,6 +122,14 @@ class CBottle3d:
     def _convert_model_NHWC(self):
         if self.channels_last:
             self.net = self.net.to(memory_format=torch.channels_last)
+
+    def _move_models_to_device(self, device: str | None):
+        if device is None:
+            return
+
+        self.net = self.net.to(device)
+        if self.separate_classifier is not None:
+            self.separate_classifier = self.separate_classifier.to(device)
 
     @classmethod
     def from_pretrained(
@@ -481,6 +492,8 @@ class CBottle3d:
             guidance_scale: float = 0.03,
 
         """
+        if batch["target"].device != self.device:
+            batch = self._move_to_device(batch)
         images, labels, condition = batch["target"], batch["labels"], batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
@@ -1082,7 +1095,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         return self.experts[-1](x, sigma, *args, **kwargs)
 
 
-def load(model: str, root="") -> CBottle3d:
+def load(model: str, root="", device: str = "cuda") -> CBottle3d:
     root = root or environment.CHECKPOINT_ROOT
     if model == "cbottle-3d-moe":
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
@@ -1090,7 +1103,9 @@ def load(model: str, root="") -> CBottle3d:
         )
         rundir = "cBottle-3d"
         paths = [os.path.join(root, rundir, c) for c in checkpoints]
-        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+        return CBottle3d.from_pretrained(
+            paths, sigma_thresholds=(100.0, 10.0), device=device
+        )
     elif model == "cbottle-3d-moe-tc":
         rundir = "cBottle-3d"
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
@@ -1105,5 +1120,6 @@ def load(model: str, root="") -> CBottle3d:
             sigma_thresholds=(100.0, 10.0),
             separate_classifier_path=classifier_path,
             allow_second_order_derivatives=True,
+            device=device,
         )
     raise ValueError(model)
