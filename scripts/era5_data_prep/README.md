@@ -1,23 +1,16 @@
 # Pre-requisites
 
-This workflow uses Celery (over Redis) for distributed parallelization of the tasks. This allows automatically scaling the work by adding or substracting workers on the fly across different clusters and simplifies the implementation of the individual workers. However, a central redis server must be available.
+This workflow uses Celery (over Redis) for distributed parallelization of the tasks. This allows automatically scaling the work by adding or substracting workers on the fly across different clusters and simplifies the implementation of the individual workers. However, you must run a separate redis server. There is much infomation about this online, but a simple way to get started is with docker
 
-Noah's desktop is running a redis server that is visible from eos and ord, but firewalled on DFW. Redis can easily be run from a container on other clusters (e.g. DFW), but currently ETL is recommended on ORD.
+    docker run -d -p 6379:6379 redis
 
-
-| Cluster | Available Server|
-|-|-|
-| eos,ord | fb7510c-lcedt.dyn.nvidia.com|
-| dfw| none |
-
-To change the redis server modify the "CELERY_BROKER" variable in [tasks.py](./tasks.py).
+This will command will start a redis server in the background.
 
 ## Smoke-testing redis
 
 To test of the server is available at the expected location install the redis-cli and run
 ```
-[I] nbrenowitz@nbrenowitz-mlt /Users/nbrenowitz
-$ redis-cli -h fb7510c-lcedt.dyn.nvidia.com
+$ redis-cli -h your_host
 fb7510c-lcedt.dyn.nvidia.com:6379> SET hello "world"
 OK
 fb7510c-lcedt.dyn.nvidia.com:6379> GET hello
@@ -46,21 +39,21 @@ Enqueue jobs
 
     python3 enqueue_regrid_jobs.py
 
+Run a worker
+
+    celery -A tasks worker -c 8 --loglevel=info
+     
 # Curation
+
 To start with update the csv index for the files
 
 ```python
 import tasks
-tasks.update_index(tasks.INPUT_ROOT)
+import config
+tasks.update_index(config.OUTPUT_ROOT, config.OUTPUT_PROFILE)
 tasks.initialize_zarr()
 ```
 When run on an existing store `tasks.initialize_zarr()` will only initialize any new variables requested.
-
-
-Launch the redis server if needed. On my desktop I do this
-```
-    $ docker run -d -p 6379:6379 redis
-```
 
 Queue the tasks
 
@@ -70,10 +63,6 @@ Start workers in various places
 
     celery -A tasks worker -c 8 --loglevel=info
 
-To start a worker on ORD:
-
-    sbatch submit_worker.sh
-
 The job can be monitored using [celery flower](https://docs.celeryq.dev/en/latest/userguide/monitoring.html#flower-real-time-celery-web-monitor). You can run flower locally like this
 
-    env FLOWER_UNAUTHENTICATED_API=true uvx --with flower --with celery[redis] celery --broker  redis://fb7510c-lcedt.dyn.nvidia.com:6379/0 flower
+    env FLOWER_UNAUTHENTICATED_API=true uvx --with flower --with celery[redis] celery --broker  redis://your_host:6379/0 flower
