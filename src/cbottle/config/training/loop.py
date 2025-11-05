@@ -41,3 +41,4 @@ class TrainingLoopBase:
     cudnn_benchmark: bool = True  # Enable torch.backends.cudnn.benchmark?
     bf16: bool = False  # Use bfloat16 for training.
     channels_last: bool = True  # Use channels_last memory format for training.
+    compile: bool = False  # Compile the entire network

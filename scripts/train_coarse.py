@@ -271,10 +271,19 @@ class TrainingLoop(loop.TrainingLoopBase):
         self._test_dataset = test_dataset
         return dataset, train_loader, test_loader
 
+    def compile_network(self):
+        # compile just the internal model for fewer recompiles as input dtypes into
+        # preconditioner change during sampling but are constant into the model
+        self.net.model = torch.compile(self.net.model, fullgraph=True)
+
     def _curry_net(self, net, batch):
+        memory_format = (
+            torch.channels_last if self.channels_last else torch.contiguous_format
+        )
+
         def D(x, t):
             return net(
-                x,
+                x.to(memory_format=memory_format),
                 torch.as_tensor(t, device=x.device),
                 batch["labels"],
                 condition=batch["condition"],
@@ -285,9 +294,13 @@ class TrainingLoop(loop.TrainingLoopBase):
         return D
 
     def _curry_net_discard_classifier(self, net, batch):
+        memory_format = (
+            torch.channels_last if self.channels_last else torch.contiguous_format
+        )
+
         def D(x, t):
             out = net(
-                x,
+                x.to(memory_format=memory_format),
                 torch.as_tensor(t, device=x.device),
                 batch["labels"],
                 condition=batch["condition"],
@@ -529,7 +542,9 @@ class TrainingLoop(loop.TrainingLoopBase):
                     sigma_min=self.sigma_min,
                 )
 
-            time_length = self.time_length
+            # TODO: Make tensorboard logging distributed/more efficient for video models
+            # For now, limit frames to avoid long image logging times
+            time_length = min(self.time_length, 4)
 
             for j in range(len(times)):
                 first_frame_time = times[j]

@@ -124,6 +124,8 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         self.net.train().requires_grad_(True).to(self.device)
         if self.channels_last:
             self.net = self.net.to(memory_format=torch.channels_last)
+        if self.compile:
+            self.compile_network()
         if dist.get_world_size() > 1:
             self.ddp = torch.nn.parallel.DistributedDataParallel(
                 self.net,
@@ -131,6 +133,9 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                 broadcast_buffers=False,
             )
         self.ema = copy.deepcopy(self.net).eval().requires_grad_(False)
+
+    def compile_network(self):
+        self.net = torch.compile(self.net)
 
     @cbottle.profiling.nvtx
     def log_tick(
