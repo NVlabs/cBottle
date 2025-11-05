@@ -1,0 +1,10 @@
+s3fs
+celery[Redis]
+boto3==1.35.23
+zarr>3
+joblib
+pandas
+scipy
+numpy
+xarray
+flower
