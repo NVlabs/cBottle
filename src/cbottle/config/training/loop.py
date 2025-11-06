@@ -40,5 +40,5 @@ class TrainingLoopBase:
     state_dump_ticks: int = 500  # How often to dump training state, None = disable.
     cudnn_benchmark: bool = True  # Enable torch.backends.cudnn.benchmark?
     bf16: bool = False  # Use bfloat16 for training.
-    channels_last: bool = True  # Use channels_last memory format for training.
-    compile: bool = False  # Compile the entire network
+    channels_last: bool = False  # Use channels_last memory format for training.
+    compile: bool = False  # torch.compile the entire network
