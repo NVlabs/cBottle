@@ -21,7 +21,6 @@ import os
 import pickle
 import time
 import warnings
-import glob
 import math
 from functools import partial
 from typing import Iterable, Union
@@ -336,7 +335,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         decay_imgs = self.lr_decay_imgs
         total_imgs = warmup_imgs + flat_imgs + decay_imgs
 
-        def lr_lambda(cur_nimg):
+        def _lr_lambda(cur_nimg):
             base_lr = self.lr
             min_lr = self.lr_min
 
@@ -355,7 +354,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
             else:
                 return min_factor
 
-        scale = lr_lambda(self.cur_nimg)
+        scale = _lr_lambda(self.cur_nimg)
         for g in self.optimizer.param_groups:
             base_lr = g.setdefault(
                 "base_lr", g.get("lr", self.optimizer.defaults["lr"])
@@ -529,10 +528,6 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         self.print_network_info(self.base_net, self.device)
         self.setup_batching()
         self.optimizer = self.get_optimizer(self.base_net.parameters())
-        self._state_checkpoint_handler = CheckpointHandler(self.run_dir)
-        self._snapshot_checkpoint_handler = CheckpointHandler(
-            self.run_dir, "network-snapshot-{}.checkpoint"
-        )
 
     def resume_from_rundir(self, run_dir=None, require_all=True):
         run_dir = run_dir or self.run_dir
