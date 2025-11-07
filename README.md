@@ -79,12 +79,13 @@ python3 scripts/train_coarse.py \
 
 ### Inference
 
-Generate multi-step video rollouts as follows:
+To create netcdf files of the generations (and optionally the corresponding ground truth), run the following:
 ```
-python scripts/inference_video_rollout.py \
-    <OUTPUT_PATH> \
-    --checkpoint_root <CHECKPOINT_ROOT> \
-    --sample.duration one_month
+torchrun --nproc-per-node 8 scripts/inference_coarse_video.py \
+    /path/to/your/model.checkpoint \
+    --output_path /output/path \
+    --sample.frame_selection_strategy unconditional
+
 ```
 
 ## Super-resolution model (cBottle-SR)

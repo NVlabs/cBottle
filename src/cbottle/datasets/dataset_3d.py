@@ -246,6 +246,9 @@ def _transform(
     if len(frames) == 1:
         return frames[0]
 
+    if frame_masker is None:
+        raise ValueError("Frame masker must be provided in video mode")
+
     out = {}
 
     out["target"] = torch.cat([f["target"] for f in frames], dim=1)
@@ -259,9 +262,7 @@ def _transform(
     out["labels"] = frames[0]["labels"]
     out["timestamp"] = frames[0]["timestamp"]
 
-    if frame_masker is not None:
-        out = frame_masker(out)
-    return out
+    return frame_masker(out)
 
 
 def _encode_task(
