@@ -175,6 +175,7 @@ class NetCDFWriter:
                     f"Timestamps must have shape (B,) or (B, T), got {timestamps.shape}"
                 )
 
+            timestamps = timestamps.cpu()
             batch_size = timestamps.shape[0]
             time_length = timestamps.shape[1]
 

@@ -482,6 +482,7 @@ class CBottle3d:
         guidance_pixels: torch.Tensor | None = None,
         guidance_scale: float = 0.03,
         bf16=True,
+        return_untransformed: bool = False,
     ):
         """
         Args:
@@ -489,7 +490,8 @@ class CBottle3d:
             guidance_pixels: Either the pixel index of ``self.input_grid``` where the
                 TCs are desired. 0<= guidance_pixels < 12 * nside ^2. Or the enitre HPX
                 tensor already set. If None, no guidance used.
-            guidance_scale: float = 0.03,
+            guidance_scale: float = 0.03
+            return_untransformed: If True, also returns the un-post-processed data (normalized and model specific grid)
 
         """
         if batch["target"].device != self.device:
@@ -620,9 +622,13 @@ class CBottle3d:
                     time_stepper=self.time_stepper,
                 )
 
-            out = self._post_process(out)
-
-            return out, self.coords
+            if return_untransformed:
+                raw = out
+                processed = self._post_process(out)
+                return processed, self.coords, raw
+            else:
+                out = self._post_process(out)
+                return out, self.coords
 
     def get_guidance_pixels(self, lons, lats) -> torch.Tensor:
         return self.classifier_grid.ang2pix(
@@ -1095,7 +1101,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         return self.experts[-1](x, sigma, *args, **kwargs)
 
 
-def load(model: str, root="", device: str = "cuda") -> CBottle3d:
+def load(model: str, root="", **kwargs) -> CBottle3d:
     root = root or environment.CHECKPOINT_ROOT
     if model == "cbottle-3d-moe":
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
@@ -1104,7 +1110,7 @@ def load(model: str, root="", device: str = "cuda") -> CBottle3d:
         rundir = "cBottle-3d"
         paths = [os.path.join(root, rundir, c) for c in checkpoints]
         return CBottle3d.from_pretrained(
-            paths, sigma_thresholds=(100.0, 10.0), device=device
+            paths, sigma_thresholds=(100.0, 10.0), **kwargs
         )
     elif model == "cbottle-3d-moe-tc":
         rundir = "cBottle-3d"
@@ -1120,6 +1126,18 @@ def load(model: str, root="", device: str = "cuda") -> CBottle3d:
             sigma_thresholds=(100.0, 10.0),
             separate_classifier_path=classifier_path,
             allow_second_order_derivatives=True,
-            device=device,
+            **kwargs,
         )
+    elif model == "cbottle-3d-video":
+        rundir = "cBottle-3d-video"
+        checkpoints = "training-state-000541152.checkpoint,training-state-001028656.checkpoint,training-state-003209456.checkpoint".split(
+            ","
+        )
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(
+            paths,
+            sigma_thresholds=(316.0, 10.0),
+            **kwargs,
+        )
+
     raise ValueError(model)
