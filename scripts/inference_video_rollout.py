@@ -67,6 +67,18 @@ class RolloutDuration(Enum):
     six_months = auto()  # Every 6 months start
     one_year = auto()  # Evert 6 months start
 
+    def to_freq(self, time_step_hours: int, time_length: int) -> str:
+        """Convert duration to pandas frequency string."""
+        freq_map = {
+            RolloutDuration.single: f"{time_step_hours * time_length}H",
+            RolloutDuration.two_weeks: "14D",
+            RolloutDuration.one_month: "MS",
+            RolloutDuration.three_months: "3MS",
+            RolloutDuration.six_months: "6MS",
+            RolloutDuration.one_year: "YS",
+        }
+        return freq_map[self]
+
 
 @dataclass(frozen=True)
 class SamplerArgs:
@@ -128,88 +140,77 @@ def compute_rollout_tasks(
     """
     Compute rollout tasks: (start_idx, num_rollout_steps, target_end_time) for each rollout.
     """
-    dataset_start = dataset_times[0]
-    dataset_end = dataset_times[-1]
+    dataset_start, dataset_end = dataset_times[0], dataset_times[-1]
 
     if start_time and end_time:
         time_range_start = pd.Timestamp(start_time)
         time_range_end = pd.Timestamp(end_time)
+        if time_range_start < dataset_start or time_range_end > dataset_end:
+            raise ValueError(
+                f"Time range {time_range_start} to {time_range_end} is outside the dataset time range {dataset_start} to {dataset_end}"
+            )
     else:
-        time_range_start = dataset_start
-        time_range_end = dataset_end
+        range_start, range_end = dataset_start, dataset_end
 
-    duration_freq_map = {
-        RolloutDuration.single: f"{time_step_hours*time_length}H",  # One full video
-        RolloutDuration.two_weeks: "14D",
-        RolloutDuration.one_month: "MS",  # Month start
-        RolloutDuration.three_months: "3MS",
-        RolloutDuration.six_months: "6MS",
-        RolloutDuration.one_year: "YS",
-    }
-
-    freq = duration_freq_map[duration]
-    rollout_start_times = pd.date_range(
-        start=time_range_start, end=time_range_end, freq=freq
+    # Generate rollout start times based on duration
+    rollout_starts = pd.date_range(
+        start=range_start,
+        end=range_end,
+        freq=duration.to_freq(time_step_hours, time_length),
     )
 
-    if len(rollout_start_times) == 0:
+    if len(rollout_starts) == 0:
         raise ValueError(
-            f"No valid rollout start times in range {time_range_start} to {time_range_end}. "
+            f"No valid rollout start times in {range_start} to {range_end}. "
             f"Dataset: {dataset_start} to {dataset_end}, duration: {duration.name}"
         )
 
-    rollout_tasks = []
-    for i, start_time_pd in enumerate(rollout_start_times):
-        start_idx = dataset_times.get_indexer([start_time_pd], method="nearest")[0]
+    new_frames_per_step = time_length - len(conditioning_frames)
+    tasks = []
 
-        if i + 1 < len(rollout_start_times):
-            target_end_time = rollout_start_times[i + 1]
+    for i, t0 in enumerate(rollout_starts):
+        start_idx = dataset_times.get_indexer([t0], method="nearest")[0]
+
+        if i + 1 < len(rollout_starts):
+            target_end = rollout_starts[i + 1]
         else:
-            # for the final rollout, use specified end or dataset end
-            target_end_time = min(time_range_end, dataset_end)
+            target_end = range_end
 
-        # Calculate how many video frames needed from start to target end
-        time_delta = (target_end_time - start_time_pd).total_seconds() / 3600.0  # hours
-        total_frames_needed = int(np.ceil(time_delta / time_step_hours))
+        # number of video frames needed to cover [t0, target_end)
+        hours = (target_end - t0).total_seconds() / 3600.0
+        frames_needed = int(np.ceil(hours / time_step_hours))
 
-        new_frames_per_step = time_length - len(conditioning_frames)
-        if total_frames_needed <= time_length:
-            # Just the initial window, no rollout steps
-            num_rollout_steps = 0
+        if frames_needed <= time_length:
+            num_steps = 0
         else:
-            frames_after_seed = total_frames_needed - time_length
-            # Use ceil to ensure we generate enough frames to cover the full duration
-            num_rollout_steps = int(np.ceil(frames_after_seed / new_frames_per_step))
+            # use ceil to ensure full coverage of duration
+            num_steps = int(
+                np.ceil((frames_needed - time_length) / new_frames_per_step)
+            )
 
-        # Verify we have enough dataset runway
-        total_video_frames_needed = (
-            time_length + num_rollout_steps * new_frames_per_step
-        )
-        last_dataset_idx_offset = (total_video_frames_needed - 1) * frame_step
+        # check dataset runway and reduce num_steps if needed
+        total_video_frames = time_length + num_steps * new_frames_per_step
+        last_idx_needed = start_idx + (total_video_frames - 1) * frame_step
 
-        if start_idx + last_dataset_idx_offset >= len(dataset_times):
-            # Not enough data - compute how many frames we can actually generate
-            available_dataset_count = len(dataset_times) - start_idx
-
-            if available_dataset_count <= 0:
-                continue
-            max_achievable_frames = ((available_dataset_count - 1) // frame_step) + 1
-
-            if max_achievable_frames < time_length:
+        if last_idx_needed >= len(dataset_times):
+            available_indices = len(dataset_times) - start_idx
+            if available_indices <= 0:
                 continue
 
-            frames_available_for_rollout = max_achievable_frames - time_length
-            num_rollout_steps = frames_available_for_rollout // new_frames_per_step
+            max_frames_achievable = ((available_indices - 1) // frame_step) + 1
+            if max_frames_achievable < time_length:
+                continue
 
-        rollout_tasks.append((start_idx, num_rollout_steps, target_end_time))
+            num_steps = (max_frames_achievable - time_length) // new_frames_per_step
 
-    if len(rollout_tasks) == 0:
+        tasks.append((start_idx, num_steps, target_end))
+
+    if len(tasks) == 0:
         raise ValueError(
-            "No valid rollout tasks could be generated. "
-            "Dataset may be too short for the specified duration."
+            "No valid rollout tasks generated. Dataset may be too short for the specified duration."
         )
 
-    return rollout_tasks
+    return tasks
 
 
 def write_step_frames(
