@@ -14,6 +14,7 @@
 # limitations under the License.
 """Train unconditional icon model using the edm-chaos training loop, loss and architecture"""
 
+import contextlib
 import dataclasses
 import datetime
 import logging
@@ -75,6 +76,12 @@ class TrainingLoop(loop.TrainingLoopBase):
         average plots
     """
 
+    lr: float = 0.0001
+    lr_min: float = 1e-6
+    lr_rampup_img: int = 10_000
+    lr_flat_imgs: int = 1_000_000_000
+    lr_decay_imgs: int = 0
+
     regression: bool = False
     valid_min_samples: int = 128
 
@@ -112,9 +119,59 @@ class TrainingLoop(loop.TrainingLoopBase):
         default_factory=base_masking_config
     )
 
+    channels_last: bool = False  # Use channels_last memory format for training.
+
     @property
     def variable_config(self) -> VariableConfig:
         return VARIABLE_CONFIGS[self.variables]
+
+    @property
+    def memory_format(self):
+        return torch.channels_last if self.channels_last else torch.contiguous_format
+
+    def learning_rate(self, cur_nimg: int) -> float:
+        """Linear ramp-up, constant period, followed by cosine decay."""
+        total_imgs = self.lr_rampup_img + self.lr_flat_imgs + self.lr_decay_imgs
+
+        base_lr = self.lr
+        min_lr = self.lr_min
+        min_factor = min_lr / base_lr
+
+        if cur_nimg < self.lr_rampup_img:
+            # linear ramp from 0 → 1
+            return float(cur_nimg) / self.lr_rampup_img
+        elif cur_nimg < self.lr_rampup_img + self.lr_flat_imgs:
+            return 1.0
+        elif cur_nimg < total_imgs:
+            # cosine decay from 1 to min_factor
+            progress = (
+                float(cur_nimg - self.lr_rampup_img - self.lr_flat_imgs)
+                / self.lr_decay_imgs
+            )
+            return min_factor + 0.5 * (1.0 - min_factor) * (
+                1.0 + math.cos(math.pi * progress)
+            )
+        else:
+            return min_factor
+
+    def _finalize_network(self, net):
+        if self.channels_last:
+            net = net.to(memory_format=torch.channels_last)
+        return net
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _disable_parameter_gradients(net):
+        requires_grad_list = []
+        for param in net.parameters():
+            requires_grad_list.append(param.requires_grad)
+            param.requires_grad_(False)
+
+        try:
+            yield
+        finally:
+            for param, requires_grad in zip(net.parameters(), requires_grad_list):
+                param.requires_grad_(requires_grad)
 
     def setup_sigma_bins(self):
         # Loss by sigma metric
@@ -272,13 +329,9 @@ class TrainingLoop(loop.TrainingLoopBase):
         return dataset, train_loader, test_loader
 
     def _curry_net(self, net, batch):
-        memory_format = (
-            torch.channels_last if self.channels_last else torch.contiguous_format
-        )
-
         def D(x, t):
             return net(
-                x.to(memory_format=memory_format),
+                x.to(memory_format=self.memory_format),
                 torch.as_tensor(t, device=x.device),
                 batch["labels"],
                 condition=batch["condition"],
@@ -289,13 +342,9 @@ class TrainingLoop(loop.TrainingLoopBase):
         return D
 
     def _curry_net_discard_classifier(self, net, batch):
-        memory_format = (
-            torch.channels_last if self.channels_last else torch.contiguous_format
-        )
-
         def D(x, t):
             out = net(
-                x.to(memory_format=memory_format),
+                x.to(memory_format=self.memory_format),
                 torch.as_tensor(t, device=x.device),
                 batch["labels"],
                 condition=batch["condition"],
@@ -415,27 +464,19 @@ class TrainingLoop(loop.TrainingLoopBase):
 
     def _report_log_likelihood(self, net, batch):
         # likelihood
-        # log likelihood only requires grad wrt the input x
-        # can turn off grad wrt parameters to save memory
-        requires_grad_list = []
-        for param in net.parameters():
-            requires_grad_list.append(param.requires_grad)
-            param.requires_grad_(False)
 
-        target = batch["target"]
-        mask = ~torch.isnan(target)
-        log_prob, _ = cbottle.likelihood.log_prob(
-            # TODO replace with denoiser classifier?
-            self._curry_net_discard_classifier(net, batch),
-            target,
-            mask,
-            sigma_min=self.sigma_min,
-            sigma_max=self.sigma_max,
-            divergence_samples=1,
-        )
-
-        for param, requires_grad in zip(net.parameters(), requires_grad_list):
-            param.requires_grad_(requires_grad)
+        with self._disable_parameter_gradients(net):
+            target = batch["target"]
+            mask = ~torch.isnan(target)
+            log_prob, _ = cbottle.likelihood.log_prob(
+                # TODO replace with denoiser classifier?
+                self._curry_net_discard_classifier(net, batch),
+                target,
+                mask,
+                sigma_min=self.sigma_min,
+                sigma_max=self.sigma_max,
+                divergence_samples=1,
+            )
 
         # Log data by label
         log_prob_per_dim = log_prob / mask.sum(dim=(1, 2, 3))  # n

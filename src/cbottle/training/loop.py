@@ -118,26 +118,27 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
             self.batch_gpu
         )
 
+    def _finalize_network(self, net):
+        return net
+
     def _setup_networks(self):
-        self.ddp = self.net = self.get_network()
+        self.net = self.get_network()
         self.net.train().requires_grad_(True).to(self.device)
-        if self.channels_last:
-            self.net = self.net.to(memory_format=torch.channels_last)
-        self.base_net = self.net
+        self.net = self._finalize_network(self.net)
+        self.ddp = self._net_forward = self.net
         if self.compile:
             # Compiling must return a new object and not modify the original net.
             # Need a reference to the original uncompiled net so parameter names are consistent in checkpointing.
-            self.net = self.compile_network(self.net)
+            self._net_forward = self._compile_network(self.net)
         if dist.get_world_size() > 1:
             self.ddp = torch.nn.parallel.DistributedDataParallel(
-                self.net,
+                self._net_forward,
                 device_ids=[self.device],
                 broadcast_buffers=False,
             )
         self.ema = copy.deepcopy(self.net).eval().requires_grad_(False)
 
-    @staticmethod
-    def compile_network(net):
+    def _compile_network(self, net):
         return torch.compile(net, fullgraph=True)
 
     @cbottle.profiling.nvtx
@@ -245,7 +246,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
     def _load_net_state(self, checkpoint, require_all):
         with checkpoint.open("net_state.pth", "r") as f:
             net_state = torch.load(f, weights_only=True, map_location="cpu")
-            self.base_net.load_state_dict(net_state, strict=require_all)
+            self.net.load_state_dict(net_state, strict=require_all)
 
     def _load_optimizer_state(self, checkpoint):
         with checkpoint.open("optimizer_state.pth", "r") as f:
@@ -325,36 +326,15 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
 
                 total_loss += loss_mean.detach().cpu() / self.num_accumulation_rounds
 
+    def learning_rate(self, cur_nimg: int) -> float:
+        return min(cur_nimg / max(self.lr_rampup_img, 1e-8), 1.0)
+
     @cbottle.profiling.nvtx
     def step_optimizer(self, cur_nimg):
         # Update weights.
         torch.cuda.nvtx.range_push("training_loop:step")
 
-        warmup_imgs = self.lr_rampup_img
-        flat_imgs = self.lr_flat_imgs
-        decay_imgs = self.lr_decay_imgs
-        total_imgs = warmup_imgs + flat_imgs + decay_imgs
-
-        def _lr_lambda(cur_nimg):
-            base_lr = self.lr
-            min_lr = self.lr_min
-
-            min_factor = min_lr / base_lr
-            if cur_nimg < warmup_imgs:
-                # linear ramp from 0 → 1
-                return float(cur_nimg) / warmup_imgs
-            elif cur_nimg < warmup_imgs + flat_imgs:
-                return 1.0
-            elif cur_nimg < total_imgs:
-                # cosine decay from 1 to min_factor
-                progress = float(cur_nimg - warmup_imgs - flat_imgs) / decay_imgs
-                return min_factor + 0.5 * (1.0 - min_factor) * (
-                    1.0 + math.cos(math.pi * progress)
-                )
-            else:
-                return min_factor
-
-        scale = _lr_lambda(self.cur_nimg)
+        scale = self.learning_rate(cur_nimg)
         for g in self.optimizer.param_groups:
             base_lr = g.setdefault(
                 "base_lr", g.get("lr", self.optimizer.defaults["lr"])
@@ -525,9 +505,9 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         self.cur_nimg = 0
         self._setup_datasets()
         self._setup_networks()
-        self.print_network_info(self.base_net, self.device)
+        self.print_network_info(self.net, self.device)
         self.setup_batching()
-        self.optimizer = self.get_optimizer(self.base_net.parameters())
+        self.optimizer = self.get_optimizer(self.net.parameters())
 
     def resume_from_rundir(self, run_dir=None, require_all=True):
         run_dir = run_dir or self.run_dir
@@ -583,7 +563,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                 self.cur_nimg,
             )
             self.net.eval()
-            self.validate(self.net)
+            self.validate(self.ddp)
             self.net.train()
 
             # Save network snapshot.
