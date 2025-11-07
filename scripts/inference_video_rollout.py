@@ -353,7 +353,7 @@ def main():
     my_rollout_tasks = samplers.distributed_split(selected_rollouts)
 
     if rank == 0:
-        logger.info(f"\n=== Rollout Configuration ===")
+        logger.info("\n=== Rollout Configuration ===")
         logger.info(f"Duration: {args.sample.duration.name}")
         logger.info(f"Video: {time_length} frames @ {args.time_step}h")
         logger.info(
