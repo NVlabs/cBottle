@@ -31,30 +31,9 @@ from cbottle.datasets.dataset_3d import VARIABLE_CONFIGS
 from cbottle.netcdf_writer import NetCDFConfig, NetCDFWriter
 from cbottle.video_rollout import VideoRollout, RolloutStep
 from inference_coarse import Dataset, Sampler, parse_model_paths
+from inference_coarse_video import FrameSelectionStrategy
 
 logger = logging.getLogger(__name__)
-
-
-class FrameSelectionStrategy(Enum):
-    """Strategy for selecting which frames to condition on during inference."""
-
-    unconditional = auto()  # No frames kept (fully unconditional)
-    first_frame = auto()  # Keep only the first frame
-    first_two = auto()  # Keep first two frames
-    endpoints = auto()  # Keep first and last frames
-    center_frame = auto()  # Keep the middle frame
-
-    def get_keep_frames(self, time_length: int) -> list[int]:
-        return {
-            FrameSelectionStrategy.unconditional: [],
-            FrameSelectionStrategy.first_frame: [0],
-            FrameSelectionStrategy.first_two: [0, 1],
-            FrameSelectionStrategy.endpoints: [0, time_length - 1],
-            FrameSelectionStrategy.center_frame: [time_length // 2],
-        }[self]
-
-    def __str__(self):
-        return self.name
 
 
 class RolloutDuration(Enum):
