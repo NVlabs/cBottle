@@ -707,7 +707,7 @@ class UNetBlock(torch.nn.Module):
             )
         )
         self.dropout = dropout
-        self.skip_scale = skip_scale
+        self.skip_scale = float(skip_scale)
         self.adaptive_scale = adaptive_scale
         self.temporal_attention = temporal_attention
         self.attention = attention

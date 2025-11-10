@@ -61,12 +61,20 @@ python3 scripts/train_coarse.py \
     --loop.network.model_channels 256 \
     --loop.snapshot_ticks 1 \
     --loop.state_dump_ticks 1 \
-    --loop.steps_per_tick 2000 \
+    --loop.steps_per_tick 4000 \
     --loop.batch_gpu 1 \
-    --loop.batch_size 32 \
-    --loop.valid_min_samples 32 \
-    --loop.dataloader_prefetch_factor 10
-    --loop.dataloader_num_workers 8
+    --loop.batch_size 16 \
+    --loop.valid_min_samples 64 \
+    --loop.dataloader_prefetch_factor 10 \
+    --loop.dataloader_num_workers 8 \
+    --loop.lr_rampup_img 50000 \
+    --loop.lr_flat_imgs 0 \
+    --loop.lr_decay_imgs 3150000 \
+    --loop.lr 0.0002 \
+    --loop.lr_min 0 \
+    --loop.bf16 \
+    --loop.channels_last \
+    --loop.compile
 ```
 
 ### Inference

@@ -14,6 +14,7 @@
 # limitations under the License.
 """Train unconditional icon model using the edm-chaos training loop, loss and architecture"""
 
+import contextlib
 import dataclasses
 import datetime
 import logging
@@ -75,8 +76,13 @@ class TrainingLoop(loop.TrainingLoopBase):
         average plots
     """
 
-    regression: bool = False
     lr: float = 0.0001
+    lr_min: float = 1e-6
+    lr_rampup_img: int = 10_000
+    lr_flat_imgs: int = 1_000_000_000
+    lr_decay_imgs: int = 0
+
+    regression: bool = False
     valid_min_samples: int = 128
 
     # loss options
@@ -113,13 +119,63 @@ class TrainingLoop(loop.TrainingLoopBase):
         default_factory=base_masking_config
     )
 
+    channels_last: bool = False  # Use channels_last memory format for training.
+
     @property
     def variable_config(self) -> VariableConfig:
         return VARIABLE_CONFIGS[self.variables]
 
+    @property
+    def memory_format(self):
+        return torch.channels_last if self.channels_last else torch.contiguous_format
+
+    def learning_rate(self, cur_nimg: int) -> float:
+        """Linear ramp-up, constant period, followed by cosine decay."""
+        total_imgs = self.lr_rampup_img + self.lr_flat_imgs + self.lr_decay_imgs
+
+        base_lr = self.lr
+        min_lr = self.lr_min
+        min_factor = min_lr / base_lr
+
+        if cur_nimg < self.lr_rampup_img:
+            # linear ramp from 0 → 1
+            return float(cur_nimg) / self.lr_rampup_img
+        elif cur_nimg < self.lr_rampup_img + self.lr_flat_imgs:
+            return 1.0
+        elif cur_nimg < total_imgs:
+            # cosine decay from 1 to min_factor
+            progress = (
+                float(cur_nimg - self.lr_rampup_img - self.lr_flat_imgs)
+                / self.lr_decay_imgs
+            )
+            return min_factor + 0.5 * (1.0 - min_factor) * (
+                1.0 + math.cos(math.pi * progress)
+            )
+        else:
+            return min_factor
+
+    def _finalize_network(self, net):
+        if self.channels_last:
+            net = net.to(memory_format=torch.channels_last)
+        return net
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _disable_parameter_gradients(net):
+        requires_grad_list = []
+        for param in net.parameters():
+            requires_grad_list.append(param.requires_grad)
+            param.requires_grad_(False)
+
+        try:
+            yield
+        finally:
+            for param, requires_grad in zip(net.parameters(), requires_grad_list):
+                param.requires_grad_(requires_grad)
+
     def setup_sigma_bins(self):
         # Loss by sigma metric
-        self._sigma_metric_bin_edges = torch.tensor([0, 0.1, 1, 10, 100, 1000])
+        self._sigma_metric_bin_edges = torch.tensor([0, 0.1, 1, 10, 100, 316, 1000])
         self._test_sigma_metric = BinnedAverage(self._sigma_metric_bin_edges).to(
             self.device
         )
@@ -275,7 +331,7 @@ class TrainingLoop(loop.TrainingLoopBase):
     def _curry_net(self, net, batch):
         def D(x, t):
             return net(
-                x,
+                x.to(memory_format=self.memory_format),
                 torch.as_tensor(t, device=x.device),
                 batch["labels"],
                 condition=batch["condition"],
@@ -288,7 +344,7 @@ class TrainingLoop(loop.TrainingLoopBase):
     def _curry_net_discard_classifier(self, net, batch):
         def D(x, t):
             out = net(
-                x,
+                x.to(memory_format=self.memory_format),
                 torch.as_tensor(t, device=x.device),
                 batch["labels"],
                 condition=batch["condition"],
@@ -408,17 +464,19 @@ class TrainingLoop(loop.TrainingLoopBase):
 
     def _report_log_likelihood(self, net, batch):
         # likelihood
-        target = batch["target"]
-        mask = ~torch.isnan(target)
-        log_prob, _ = cbottle.likelihood.log_prob(
-            # TODO replace with denoiser classifier?
-            self._curry_net_discard_classifier(net, batch),
-            target,
-            mask,
-            sigma_min=self.sigma_min,
-            sigma_max=self.sigma_max,
-            divergence_samples=1,
-        )
+
+        with self._disable_parameter_gradients(net):
+            target = batch["target"]
+            mask = ~torch.isnan(target)
+            log_prob, _ = cbottle.likelihood.log_prob(
+                # TODO replace with denoiser classifier?
+                self._curry_net_discard_classifier(net, batch),
+                target,
+                mask,
+                sigma_min=self.sigma_min,
+                sigma_max=self.sigma_max,
+                divergence_samples=1,
+            )
 
         # Log data by label
         log_prob_per_dim = log_prob / mask.sum(dim=(1, 2, 3))  # n
@@ -510,16 +568,19 @@ class TrainingLoop(loop.TrainingLoopBase):
             hpx = net.domain._grid
             ring_images = hpx.reorder(earth2grid.healpix.PixelOrder.RING, images)
 
-            d = sample_from_condition(
-                net,
-                batch,
-                batch_info=self.batch_info,
-                regression=self.regression,
-                sigma_max=self.sigma_max,
-                sigma_min=self.sigma_min,
-            )
+            with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
+                d = sample_from_condition(
+                    net,
+                    batch,
+                    batch_info=self.batch_info,
+                    regression=self.regression,
+                    sigma_max=self.sigma_max,
+                    sigma_min=self.sigma_min,
+                )
 
-            time_length = self.time_length
+            # TODO: Make tensorboard logging distributed/more efficient for video models
+            # For now, limit frames to avoid long image logging times
+            time_length = min(self.time_length, 4)
 
             for j in range(len(times)):
                 first_frame_time = times[j]
@@ -540,13 +601,14 @@ class TrainingLoop(loop.TrainingLoopBase):
                             f"seasonal_cycle/{field}/{season}/truth",
                             ring_images[j, c, t] * b.scales[c] + b.center[c],
                         )
-            with torch.no_grad():
-                # Classifier validation
-                self.validate_classifier(images, net, batch)
-                loss = self.test_step(**batch)
-                training_stats.report("Loss/test_loss", loss)
+            with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
+                with torch.no_grad():
+                    # Classifier validation
+                    self.validate_classifier(images, net, batch)
+                    loss = self.test_step(**batch)
+                    training_stats.report("Loss/test_loss", loss)
 
-            self._report_log_likelihood(net, batch)
+                self._report_log_likelihood(net, batch)
 
         averages = finish()
         self.finish_sigma_by_loss_metrics()

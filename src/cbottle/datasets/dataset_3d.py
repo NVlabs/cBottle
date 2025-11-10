@@ -470,12 +470,13 @@ def _get_loaders(
     Returns:
         List of loaders for the specified dataset
     """
+    use_q = "Q" in variable_config.variables_3d
 
     if dataset == "icon":
         loaders = [
             _loader_from_catalog(
                 catalog.icon_plevel(),
-                variables_3d=["T", "U", "V", "Z", "Q"],
+                variables_3d=["T", "U", "V", "Z"] + (["Q"] if use_q else []),
                 variables_2d=["tcwv"],
                 level_coord_name="level",
                 # convert levels to Pa
@@ -512,7 +513,7 @@ def _get_loaders(
     elif dataset == "era5":
         target_data_loader = _loader_from_catalog(
             catalog.era5_hpx6(),
-            variables_3d=["u", "v", "t", "z", "q"],
+            variables_3d=["u", "v", "t", "z"] + (["q"] if use_q else []),
             variables_2d=[
                 "sstk",
                 "ci",

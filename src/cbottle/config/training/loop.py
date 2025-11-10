@@ -34,3 +34,5 @@ class TrainingLoopBase:
     snapshot_ticks: int = 50  # How often to save network snapshots, None = disable.
     state_dump_ticks: int = 500  # How often to dump training state, None = disable.
     cudnn_benchmark: bool = True  # Enable torch.backends.cudnn.benchmark?
+    bf16: bool = False  # Use bfloat16 for training.
+    compile: bool = False  # torch.compile the entire network
