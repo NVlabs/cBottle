@@ -72,10 +72,10 @@ class SamplerArgs:
     seed: int | None = None
     min_samples: a[int, Help("Minimum number of samples from dataset (-1 for all)")] = 1
     sampler: Sampler = Sampler.all
-    seed_conditioning: a[
-        FrameSelectionStrategy, Help("Conditioning strategy for seed step")
+    initialization_conditioning: a[
+        FrameSelectionStrategy, Help("Conditioning strategy for initialization")
     ] = FrameSelectionStrategy.unconditional
-    num_rollout_conditioning_frames: a[
+    rollout_num_conditioning_frames: a[
         int,
         Help(
             "Number of conditioning frames for rollout steps (must be contiguous from start)"
@@ -208,8 +208,8 @@ def write_step_frames(
         diags.coords,
         diags.new_timestamps[:, frame_mask],
         scalars={
-            "frame_source_flag": diags.frame_source_flags[:, frame_mask],
-            "lead_time": diags.lead_time_hours[:, frame_mask],
+            "frame_source_flag": diags.new_frame_source_flags[:, frame_mask],
+            "lead_time_hours": diags.new_lead_time_hours[:, frame_mask],
         },
     )
 
@@ -270,14 +270,14 @@ def main():
         frame_masker=None,  # masking handled by VideoRollout
     )
 
-    seed_conditioning_frames = args.sample.seed_conditioning.get_keep_frames(
+    initialization_frames = args.sample.initialization_conditioning.get_keep_frames(
         time_length
     )
-    num_rollout_conditioning = args.sample.num_rollout_conditioning_frames
+    rollout_num_conditioning = args.sample.rollout_num_conditioning_frames
 
-    if args.sample.duration != RolloutDuration.single and num_rollout_conditioning == 0:
+    if args.sample.duration != RolloutDuration.single and rollout_num_conditioning == 0:
         raise ValueError(
-            "Multi-step rollouts require num_rollout_conditioning_frames > 0."
+            "Multi-step rollouts require rollout_num_conditioning_frames > 0."
         )
 
     dataset_times = dataset.times
@@ -287,7 +287,7 @@ def main():
         time_step_hours=args.time_step,
         time_length=time_length,
         frame_step=dataset.frame_step,
-        conditioning_frames=list(range(num_rollout_conditioning)),
+        conditioning_frames=list(range(rollout_num_conditioning)),
         start_time=args.start_time,
         end_time=args.end_time,
     )
@@ -296,8 +296,8 @@ def main():
         "description": "Video rollout inference",
         "dataset": args.dataset.name,
         "rollout_duration": args.sample.duration.name,
-        "seed_conditioning": args.sample.seed_conditioning.name,
-        "num_rollout_conditioning_frames": num_rollout_conditioning,
+        "initialization_conditioning": args.sample.initialization_conditioning.name,
+        "rollout_num_conditioning_frames": rollout_num_conditioning,
         "time_step_hours": args.time_step,
     }
 
@@ -336,8 +336,8 @@ def main():
         logger.info(f"Duration: {args.sample.duration.name}")
         logger.info(f"Video: {time_length} frames @ {args.time_step}h")
         logger.info(
-            f"Conditioning - Seed: {args.sample.seed_conditioning.name}, "
-            f"Rollout: {num_rollout_conditioning} frames"
+            f"Conditioning - Initialization: {args.sample.initialization_conditioning.name}, "
+            f"Rollout: {rollout_num_conditioning} frames"
         )
         logger.info(
             f"Sampling: {args.sample.sampler.name} - "
@@ -375,11 +375,11 @@ def main():
         batch = dataset[start_idx]
 
         target_frames = batch["target"]
-        seed_frames = {
-            idx: target_frames[:, :, idx, :] for idx in seed_conditioning_frames
+        init_frames = {
+            idx: target_frames[:, :, idx, :] for idx in initialization_frames
         }
 
-        state, diags = rollout.initialize(start_time_ts, frames=seed_frames)
+        state, diags = rollout.initialize(start_time_ts, frames=init_frames)
 
         target_end_timestamp = target_end_time.value / 1e9
         write_step_frames(writer, diags, target_end_timestamp)
@@ -392,7 +392,7 @@ def main():
 
         for _ in pbar:
             state, diags = rollout.step_forward(
-                state, num_conditioning_frames=num_rollout_conditioning
+                state, num_conditioning_frames=rollout_num_conditioning
             )
             write_step_frames(writer, diags, target_end_timestamp)
 

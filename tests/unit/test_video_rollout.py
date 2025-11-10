@@ -73,7 +73,6 @@ def setup():
 
 
 def test_video_rollout_forward(setup):
-    """Test forward rollout with proper state/diagnostics separation."""
     model, dataset, nchannels, npix, time_step = setup
     time_length = model.time_length
     rollout = VideoRollout(model, dataset)
@@ -106,9 +105,9 @@ def test_video_rollout_forward(setup):
     assert len(diags3.frames_to_write_indices) == time_length - 2
 
     # Check timestamps are contiguous
-    times1 = diags1.new_timestamps[0].cpu().numpy()
-    times2 = diags2.new_timestamps[0].cpu().numpy()
-    times3 = diags3.new_timestamps[0].cpu().numpy()
+    times1, times2, times3 = (
+        d.new_timestamps[0].cpu().numpy() for d in (diags1, diags2, diags3)
+    )
 
     assert len(times1) == time_length
     assert len(times2) == time_length - 1
@@ -120,9 +119,9 @@ def test_video_rollout_forward(setup):
     assert np.allclose(time_diffs, expected_diff, atol=200.0)
 
     # Check lead times
-    lead1 = diags1.lead_time_hours[0].cpu().numpy()
-    lead2 = diags2.lead_time_hours[0].cpu().numpy()
-    lead3 = diags3.lead_time_hours[0].cpu().numpy()
+    lead1, lead2, lead3 = (
+        d.new_lead_time_hours[0].cpu().numpy() for d in (diags1, diags2, diags3)
+    )
 
     assert np.allclose(lead1, [0, 3, 6, 9])
     assert np.allclose(lead2, [12, 15, 18])  # only new frames are counted
@@ -135,18 +134,23 @@ def test_video_rollout_backward(setup):
     time_length = model.time_length
     rollout = VideoRollout(model, dataset)
 
-    state, diags1 = rollout.initialize(dataset.times[20])
-    assert state.rollout_start_time == state.window_start_time == dataset.times[20]
+    start_index = 20
+    state, diags1 = rollout.initialize(dataset.times[start_index])
+    assert (
+        state.rollout_start_time
+        == state.window_start_time
+        == dataset.times[start_index]
+    )
 
     # Step backward (moves back by 3 frames = 9 hours)
     state, diags2 = rollout.step_backward(state, num_conditioning_frames=1)
 
     assert not diags2.is_initialization
-    assert state.rollout_start_time == dataset.times[20]
-    assert state.window_start_time == dataset.times[20] - pd.Timedelta(hours=9)
+    assert state.rollout_start_time == dataset.times[start_index]
+    assert state.window_start_time == dataset.times[start_index] - pd.Timedelta(hours=9)
     assert len(diags2.frames_to_write_indices) == time_length - 1
 
-    lead2 = diags2.lead_time_hours[0].cpu().numpy()
+    lead2 = diags2.new_lead_time_hours[0].cpu().numpy()
     assert np.allclose(lead2, [-9, -6, -3])  # frames -3,-2,-1
 
 
@@ -161,7 +165,7 @@ def test_video_rollout_with_conditioning(setup):
     target = batch["target"]
     frames = {0: target[:, :, 0, :], 1: target[:, :, 1, :]}
 
-    state, diags = rollout.initialize(dataset.times[0], frames=frames)
+    _, diags = rollout.initialize(dataset.times[0], frames=frames)
 
     assert diags.is_initialization
     assert len(diags.frames_to_write_indices) == time_length
