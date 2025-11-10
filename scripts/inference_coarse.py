@@ -102,6 +102,20 @@ def parse_tc_location(tc_location: str):
     return None, None
 
 
+def parse_model_paths(
+    model_arg: str, sigma_thresholds_arg: str
+) -> tuple[list[str], list[float]]:
+    """Parse comma-separated model paths and sigma thresholds."""
+    state_paths = [s.strip() for s in model_arg.split(",")]
+    sigma_thresholds = (
+        [float(tok) for tok in sigma_thresholds_arg.split(",")]
+        if sigma_thresholds_arg
+        else []
+    )
+    sigma_thresholds = sigma_thresholds[: len(state_paths) - 1]
+    return state_paths, sigma_thresholds
+
+
 def get_requested_times(args):
     if args.start_time:
         return pd.date_range(
@@ -201,9 +215,9 @@ def main():
     warnings.filterwarnings("ignore", "Cannot do a zero-copy NCHW to NHWC")
     args = parse_args(CLI, convert_underscore_to_hyphen=False)
 
-    state_paths = [s.strip() for s in args.state_path.split(",")]
-    sigma_thresholds = [float(tok) for tok in args.sigma_thresholds.split(",")]
-    sigma_thresholds = sigma_thresholds[: len(state_paths) - 1]
+    state_paths, sigma_thresholds = parse_model_paths(
+        args.state_path, args.sigma_thresholds
+    )
 
     if args.sample.tc_location:
         tc_lats, tc_lons = parse_tc_location(args.sample.tc_location)

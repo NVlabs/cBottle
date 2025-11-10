@@ -43,4 +43,7 @@ class ModelConfigV1:
     @classmethod
     def loads(cls, s):
         d = json.loads(s)
+        # Filter out fields that aren't in the current model config definition
+        current_fields = {field.name for field in dataclasses.fields(cls)}
+        d = {k: v for k, v in d.items() if k in current_fields}
         return cls(**d)
