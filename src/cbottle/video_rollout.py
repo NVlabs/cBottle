@@ -40,24 +40,26 @@ class RolloutDiagnostics:
     timestamps: torch.Tensor  # (1, T) absolute timestamps in seconds
     conditioning_indices: list[int]  # Indices of conditioning frames
     coords: Coords
-    rollout_start_timestamp: (
-        float  # Reference timestamp for computing lead times (seconds)
-    )
+    rollout_start_timestamp: float  # Start of rollout in seconds
     is_initialization: bool = False
 
-    @property
-    def time_length(self) -> int:
-        return self.frames.shape[2]
+    def __post_init__(self):
+        time_length = self.frames.shape[2]
 
-    @property
-    def frame_source(self) -> list[int]:
-        """Frame source for each frame: 0=GT, 1=generated, 2=conditioning."""
-        return [
+        # Frame source for each frame: 0=GT, 1=generated, 2=conditioning.
+        self.frame_source = [
             (0 if self.is_initialization else 2)
             if i in self.conditioning_indices
             else 1
-            for i in range(self.time_length)
+            for i in range(time_length)
         ]
+
+        if self.is_initialization:
+            self.frames_to_write_indices = list(range(time_length))
+        else:
+            self.frames_to_write_indices = [
+                i for i, src in enumerate(self.frame_source) if src == 1
+            ]
 
     @property
     def device(self) -> torch.device:
@@ -68,15 +70,15 @@ class RolloutDiagnostics:
         return self.coords.batch_info
 
     @property
-    def frames_to_write_indices(self) -> list[int]:
-        """Indices of frames to write (initialization: all, rollout: only generated)."""
-        if self.is_initialization:
-            return list(range(self.time_length))
-        return [i for i, src in enumerate(self.frame_source) if src == 1]
+    def lead_time_hours(self) -> torch.Tensor:
+        """Lead times in hours relative to rollout start."""
+        return ((self.timestamps - self.rollout_start_timestamp) / 3600.0).to(
+            self.device
+        )
 
     @property
     def new_frames(self) -> torch.Tensor:
-        """Newly generated frames (excludes conditioning frames for rollout steps).
+        """New frames from this rollout step (excludes previously generated frames used for conditioning).
 
         Returns:
             (1, C, num_frames, npix)
@@ -85,27 +87,21 @@ class RolloutDiagnostics:
 
     @property
     def new_timestamps(self) -> torch.Tensor:
-        """Timestamps for newly generated frames"""
+        """Timestamps corresponding to new frames from this rollout step"""
         return self.timestamps[:, self.frames_to_write_indices].to(self.device)
 
     @property
-    def frame_source_flags(self) -> torch.Tensor:
-        """Frame source flags (1, num_frames)."""
-        indices = self.frames_to_write_indices
+    def new_frame_source_flags(self) -> torch.Tensor:
+        """Frame source flags for new frames from this rollout step"""
         return torch.tensor(
-            [[self.frame_source[i] for i in indices]], dtype=torch.int8
+            [[self.frame_source[i] for i in self.frames_to_write_indices]],
+            dtype=torch.int8,
         ).to(self.device)
 
     @property
-    def lead_time_hours(self) -> torch.Tensor:
-        """Lead times in hours relative to rollout start."""
-        indices = self.frames_to_write_indices
-
-        selected_timestamps = self.timestamps[:, indices]
-        lead_seconds = selected_timestamps - self.rollout_start_timestamp
-        lead_hours = lead_seconds / 3600.0
-
-        return lead_hours.to(self.device)
+    def new_lead_time_hours(self) -> torch.Tensor:
+        """Lead times for the new frames relative to start of this rollout step."""
+        return self.lead_time_hours[:, self.frames_to_write_indices]
 
 
 @dataclass
