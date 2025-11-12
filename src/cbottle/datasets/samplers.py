@@ -49,7 +49,14 @@ def split(x, rank, world_size, drop_extra=True):
     return x[start : start + samples_per_rank]
 
 
-def distributed_split(tasks, drop_last=True):
+def distributed_split(tasks, drop_last: bool = False):
+    """
+    Args:
+        tasks: List of tasks to split.
+        drop_last: Whether to drop the remainder tasks after splitting equally among workers.
+    Returns:
+        Tasks assigned to the calling rank.
+    """
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     return split(tasks, rank, world_size, drop_extra=drop_last)
