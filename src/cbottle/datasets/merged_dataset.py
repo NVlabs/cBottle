@@ -21,6 +21,7 @@ import numpy as np
 import asyncio
 from typing import Callable
 import cbottle.datetime
+from cbottle.datasets.samplers import split
 
 
 class _MergedLoader:
@@ -36,27 +37,6 @@ class _MergedLoader:
         for d in arrays:
             data.update(d)
         return data
-
-
-def _split(x, rank, world_size, drop_extra=True):
-    n = len(x)
-    base = n // world_size
-    rem = n % world_size
-
-    if drop_extra:
-        samples_per_rank = base
-        x = x[: base * world_size]
-        start = rank * base
-    else:
-        # give the first rem ranks one extra sample
-        if rank < rem:
-            samples_per_rank = base + 1
-            start = rank * samples_per_rank
-        else:
-            samples_per_rank = base
-            start = rem * (base + 1) + (rank - rem) * base
-
-    return x[start : start + samples_per_rank]
 
 
 class TimeMergedDataset(torch.utils.data.IterableDataset):
@@ -144,7 +124,7 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
         return pd.DatetimeIndex(self._times)
 
     def set_times(self, times):
-        self._times = _split(
+        self._times = split(
             cbottle.datetime.as_numpy(times), self.rank, self.world_size
         )
 
@@ -188,7 +168,7 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
             self._generator_shuffle(chunk_idxs, info)
 
         # Shard chunks across the data workers
-        chunk_idxs = _split(chunk_idxs, worker_id, num_workers, drop_extra=False)
+        chunk_idxs = split(chunk_idxs, worker_id, num_workers, drop_extra=False)
 
         for chunk_idx in chunk_idxs:
             if chunk_idx > self.max_valid_chunk_idx:
