@@ -103,14 +103,12 @@ def parse_tc_location(tc_location: str):
 
 
 def parse_model_paths(
-    model_arg: str, sigma_thresholds_arg: str
+    model_paths: str, sigma_thresholds: str
 ) -> tuple[list[str], list[float]]:
     """Parse comma-separated model paths and sigma thresholds."""
-    state_paths = [s.strip() for s in model_arg.split(",")]
+    state_paths = [s.strip() for s in model_paths.split(",")]
     sigma_thresholds = (
-        [float(tok) for tok in sigma_thresholds_arg.split(",")]
-        if sigma_thresholds_arg
-        else []
+        [float(tok) for tok in sigma_thresholds.split(",")] if sigma_thresholds else []
     )
     sigma_thresholds = sigma_thresholds[: len(state_paths) - 1]
     return state_paths, sigma_thresholds
