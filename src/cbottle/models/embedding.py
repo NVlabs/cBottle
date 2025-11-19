@@ -104,16 +104,28 @@ class CalendarEmbedding(torch.nn.Module):
         self.include_legacy_bug = include_legacy_bug
 
     def forward(self, day_of_year, second_of_day):
-        if second_of_day.shape != day_of_year.shape:
-            raise ValueError()
 
-        if self.include_legacy_bug:
-            local_time = (second_of_day.unsqueeze(2) - self.lon * 86400 // 360) % 86400
+        if second_of_day is None:
+
+            doy = day_of_year.unsqueeze(2)
+            b = self.embed_day((doy / 365.25) % 1)
+            b = b.repeat(1,1,1, self.lon.shape[0])
+
+            return torch.concat([b, b], dim=1)
+   
         else:
-            local_time = (second_of_day.unsqueeze(2) + self.lon * 86400 // 360) % 86400
+            if second_of_day.shape != day_of_year.shape:
+                raise ValueError()
 
-        a = self.embed_second(local_time / 86400)
-        doy = day_of_year.unsqueeze(2)
-        b = self.embed_day((doy / 365.25) % 1)
-        a, b = torch.broadcast_tensors(a, b)
-        return torch.concat([a, b], dim=1)  # (n c x)
+            if self.include_legacy_bug:
+                local_time = (second_of_day.unsqueeze(2) - self.lon * 86400 // 360) % 86400
+            else:
+                local_time = (second_of_day.unsqueeze(2) + self.lon * 86400 // 360) % 86400
+
+            a = self.embed_second(local_time / 86400)
+            doy = day_of_year.unsqueeze(2)
+            b = self.embed_day((doy / 365.25) % 1)
+
+            a, b = torch.broadcast_tensors(a, b)
+
+            return torch.concat([a, b], dim=1)  # (n c x)
