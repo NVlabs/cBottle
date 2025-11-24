@@ -117,3 +117,40 @@ class CalendarEmbedding(torch.nn.Module):
         b = self.embed_day((doy / 365.25) % 1)
         a, b = torch.broadcast_tensors(a, b)
         return torch.concat([a, b], dim=1)  # (n c x)
+    
+class CalendarEmbeddingOnlyDay(torch.nn.Module):
+    """Time embedding assuming 365.25 day years. Only uses day_of_year for use cases with daily resolution, second_of_day arg preserved for compatibility.
+
+    Args:
+        day_of_year: (n, t)
+        second_of_day: (n, t)
+    Returns:
+        (n, embed_channels * 2, t, x)
+
+    """
+
+    def __init__(self, lon, embed_channels: int, include_legacy_bug: bool = False):
+        """
+        Args:
+            include_legacy_bug: Provided for backwards compatibility
+                with existing checkpoints. If True, use the incorrect formula
+                for local_time (hour - lon) instead of the correct formula (hour + lon)
+
+            only day_of_year used, other args preserved for compatibility with SongUNet.
+        """
+        super().__init__()
+        self.register_buffer("lon", lon, persistent=False)
+        self.embed_channels = embed_channels
+        self.embed_day = FrequencyEmbedding(embed_channels)
+        self.out_channels = embed_channels * 2
+
+    def forward(self, day_of_year, second_of_day):
+
+        doy = day_of_year.unsqueeze(2)
+        b = self.embed_day((doy / 365.25) % 1)
+        # Ensure spatial broadcast to match X = self.lon.numel()
+        if b.dim() == 3:  # (N, C, T) -> (N, C, T, 1)
+            b = b.unsqueeze(-1)
+        if b.shape[-1] == 1:
+            b = b.expand(-1, -1, -1, self.lon.numel())
+        return b
