@@ -28,10 +28,10 @@ from cbottle.patchify import apply_on_patches
 from importlib.metadata import version
 
 
-
 def _get_torch_version():
-    major, minor = version('torch').split(".")[:2]
+    major, minor = version("torch").split(".")[:2]
     return int(major), int(minor)
+
 
 def create_cbottle3d(
     separate_classifier=None,
