@@ -120,7 +120,7 @@ class CalendarEmbedding(torch.nn.Module):
 
 
 class CalendarEmbeddingOnlyDay(torch.nn.Module):
-    """Time embedding assuming 365.25 day years. Only uses day_of_year for use cases with daily resolution, second_of_day arg preserved for compatibility.
+    """Same as CalendarEmbedding but returns only day_of_year embedding channels.
 
     Args:
         day_of_year: (n, t)
