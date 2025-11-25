@@ -14,12 +14,13 @@
 # limitations under the License.
 import os
 import torch
+import datetime
 from cbottle import training_stats
 
 # ----------------------------------------------------------------------------
 
 
-def init():
+def init(timeout_infinite=False):
     if "WORLD_SIZE" not in os.environ:
         if "SLURM_NTASKS" in os.environ:
             os.environ["WORLD_SIZE"] = os.environ.get("SLURM_NTASKS", "1")
@@ -49,7 +50,13 @@ def init():
             os.environ["LOCAL_RANK"] = "0"
 
     backend = "gloo" if os.name == "nt" else "nccl"
-    torch.distributed.init_process_group(backend=backend, init_method="env://")
+    if timeout_infinite:
+        timeout = datetime.timedelta(days=365)
+    else:
+        timeout = None
+    torch.distributed.init_process_group(
+        backend=backend, init_method="env://", timeout=timeout
+    )
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
 
     sync_device = torch.device("cuda") if get_world_size() > 1 else None
