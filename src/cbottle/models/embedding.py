@@ -117,7 +117,8 @@ class CalendarEmbedding(torch.nn.Module):
         b = self.embed_day((doy / 365.25) % 1)
         a, b = torch.broadcast_tensors(a, b)
         return torch.concat([a, b], dim=1)  # (n c x)
-    
+
+
 class CalendarEmbeddingOnlyDay(torch.nn.Module):
     """Time embedding assuming 365.25 day years. Only uses day_of_year for use cases with daily resolution, second_of_day arg preserved for compatibility.
 
@@ -145,7 +146,6 @@ class CalendarEmbeddingOnlyDay(torch.nn.Module):
         self.out_channels = embed_channels * 2
 
     def forward(self, day_of_year, second_of_day):
-
         doy = day_of_year.unsqueeze(2)
         b = self.embed_day((doy / 365.25) % 1)
         # Ensure spatial broadcast to match X = self.lon.numel()

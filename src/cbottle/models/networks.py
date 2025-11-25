@@ -1066,7 +1066,7 @@ class SongUNet(torch.nn.Module):
         add_spatial_embedding: bool = False,
         calendar_embed_channels: int = 0,  # embedding dimension for year fraction and second fraction
         calendar_include_legacy_bug: bool = False,
-        calendar_only_day: bool = False, # drop second_of_day from calendar embedding in case of daily resolution data
+        calendar_only_day: bool = False,  # drop second_of_day from calendar embedding in case of daily resolution data
         decoder_start_with_temporal_attention: bool = False,
         upsample_temporal_attention: bool = False,
         channels_per_head: int = -1,  # uses all heads if -1, otherwise uses this many per head
