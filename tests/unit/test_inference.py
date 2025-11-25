@@ -25,6 +25,12 @@ from cbottle.datasets.base import BatchInfo
 from cbottle.datasets.dataset_2d import MAX_CLASSES as LABEL_DIM
 from cbottle.models.networks import Output
 from cbottle.patchify import apply_on_patches
+from importlib.metadata import version
+
+
+def _get_torch_version():
+    major, minor = version("torch").split(".")[:2]
+    return int(major), int(minor)
 
 
 def create_cbottle3d(
@@ -203,7 +209,10 @@ def test_cbottle3d_sample(time_stepper, channels_last):
     mock_cbottle3d = create_cbottle3d(
         separate_classifier, time_stepper=time_stepper, channels_last=channels_last
     )
-    mock_cbottle3d.torch_compile()
+
+    if _get_torch_version() >= (2, 9):
+        mock_cbottle3d.torch_compile()
+
     # Test the sample method
     batch = create_input_data((1, 3, 1, 12 * 64 * 64))
     output, coords = mock_cbottle3d.sample(
