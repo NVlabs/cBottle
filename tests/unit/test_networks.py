@@ -237,6 +237,23 @@ def test_SongUnetCalendarEmbeddings(calendar_only_day: bool):
     out = net(
         img, noise_labels, class_labels=None, day_of_year=doy, second_of_day=second
     )
+
+    cal_embed = net.embed_calendar(doy, second)
+    if calendar_only_day:
+        assert cal_embed.shape == (
+            n,
+            2 * net.calendar_embed_channels,
+            t,
+            net.domain.numel(),
+        )
+    else:
+        assert cal_embed.shape == (
+            n,
+            4 * net.calendar_embed_channels,
+            t,
+            net.domain.numel(),
+        )
+
     assert out.out.shape == (n, 3, t, net.domain.numel())
 
 
