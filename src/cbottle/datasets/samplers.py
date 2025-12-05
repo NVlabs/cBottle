@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 import random
 
 import torch.utils.data
@@ -28,38 +29,14 @@ def subsample(dataset, min_samples):
     return sampler
 
 
-def split(x, rank, world_size, drop_extra=True):
-    n = len(x)
-    base = n // world_size
-    rem = n % world_size
-
-    if drop_extra:
-        samples_per_rank = base
-        x = x[: base * world_size]
-        start = rank * base
-    else:
-        # give the first rem ranks one extra sample
-        if rank < rem:
-            samples_per_rank = base + 1
-            start = rank * samples_per_rank
-        else:
-            samples_per_rank = base
-            start = rem * (base + 1) + (rank - rem) * base
-
-    return x[start : start + samples_per_rank]
-
-
-def distributed_split(tasks, drop_last: bool = False):
-    """
-    Args:
-        tasks: List of tasks to split.
-        drop_last: Whether to drop the remainder tasks after splitting equally among workers.
-    Returns:
-        Tasks assigned to the calling rank.
-    """
+def distributed_split(tasks, drop_last=True):
+    n = len(tasks)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    return split(tasks, rank, world_size, drop_extra=drop_last)
+    chunk = math.ceil(len(tasks) / world_size)
+    start = rank * chunk
+    stop = n if drop_last and (rank == world_size - 1) else start + chunk
+    return [t for i, t in enumerate(tasks) if start <= i < stop]
 
 
 class InfiniteSequentialSampler(torch.utils.data.Sampler):

@@ -18,8 +18,6 @@ import time
 import tqdm
 import logging
 import warnings
-import os
-from enum import auto, Enum
 from dataclasses import dataclass
 
 import cbottle.distributed as dist
@@ -30,31 +28,47 @@ from cbottle.datasets.dataset_3d import VARIABLE_CONFIGS
 from cbottle.training.video.frame_masker import FrameMasker
 from cbottle.datasets.merged_dataset import TimeMergedMapStyle
 from cbottle.netcdf_writer import NetCDFConfig, NetCDFWriter
+from cbottle.moe_utils import parse_model_paths
+from cbottle.autoregression import FrameSelectionStrategy, autoregressionRuntimeConfig
 from inference_coarse import Dataset, Sampler, get_requested_times
 
 logger = logging.getLogger(__name__)
 
 
-class FrameSelectionStrategy(Enum):
-    """Strategy for selecting which frames to condition on during inference."""
-
-    unconditional = auto()  # No frames kept (fully unconditional)
-    first_frame = auto()  # Keep only the first frame
-    first_two = auto()  # Keep first two frames
-    endpoints = auto()  # Keep first and last frames
-    center_frame = auto()  # Keep the middle frame
-
-    def get_keep_frames(self, time_length: int) -> list[int]:
-        return {
-            FrameSelectionStrategy.unconditional: [],
-            FrameSelectionStrategy.first_frame: [0],
-            FrameSelectionStrategy.first_two: [0, 1],
-            FrameSelectionStrategy.endpoints: [0, time_length - 1],
-            FrameSelectionStrategy.center_frame: [time_length // 2],
-        }[self]
-
-    def __str__(self):
-        return self.name
+def extract_batch_for_single_autoregression(
+    batch, autoregression_cfg, autoregression_step
+):
+    batch_window = {}
+    start, end = autoregression_cfg.start_end_pairs[autoregression_step]
+    num_conditioning_frames = autoregression_cfg.num_conditioning_frames
+    for key, value in batch.items():
+        # resemble conditions
+        if key == "labels":
+            batch_window[key] = value
+        elif key in ["second_of_day", "day_of_year"]:
+            batch_window[key] = value[:, start:end]
+        elif key == "condition" and autoregression_step != 0:
+            if autoregression_step == 0:
+                batch_window[key] = value[:, :, start:end]
+            else:
+                condition_window = value[:, :, start:end]
+                num_channels = batch["target"].shape[1]
+                # set mask
+                condition_window[:, -1:, :num_conditioning_frames] = 1
+                # clear frame condition
+                condition_window[
+                    :,
+                    :num_channels,
+                ] = 0
+                # set frame condition
+                condition_window[:, :num_channels, :num_conditioning_frames] = batch[
+                    "last_output"
+                ][:, :, -num_conditioning_frames:]
+                batch_window[key] = condition_window
+        # target or condition for the first autoregression step
+        else:
+            batch_window[key] = value[:, :, start:end]
+    return batch_window
 
 
 @dataclass(frozen=True)
@@ -78,22 +92,39 @@ class SamplerArgs:
         FrameSelectionStrategy.unconditional
     )
     seed: int | None = None
+    autoregression_enabled: a[bool, Help("Use sliding-window autoregression")] = False
+    autoregression_duration: a[int, Help("Number of days to cover")] = False
+    autoregression_num_conditioning_frames: a[
+        int,
+        Help(
+            "Number of conditioning frames during autoregression steps (contiguous from start)"
+        ),
+    ] = 1
 
 
 @dataclass
 class CLI:
     state_path: a[
         str,
-        Help("Path to the model state file"),
+        Help(
+            "Direct paths to model state file (comma-separated for MoE). "
+            "If not provided, uses checkpoint_root + named model 'cbottle-3d-video'"
+        ),
     ]
     output_path: a[str, Help("Path to the output directory")]
+    checkpoint_root: a[
+        str, Help("Root directory for named models (used if state_path not provided)")
+    ] = ""
+    sigma_thresholds: a[str, Help("Comma-separated sigma thresholds for MoE")] = (
+        "100.0,10.0"
+    )
     dataset: Dataset = Dataset.icon
     data_split: str = ""
     sample: SamplerArgs = SamplerArgs()
     hpx_level: int = 6
     start_time: a[str, Help("Start time")] = ""
     end_time: a[str, Help("End time")] = "2018-12-31"
-    time_step: int = 6  # spacing of frames in hours
+    time_step: a[int, Help("Hours between frames")] = 6
 
 
 def save_inferences(
@@ -107,6 +138,7 @@ def save_inferences(
     rank: int,
     world_size: int,
     keep_frames: list[int] = [],
+    autoregression_cfg: autoregressionRuntimeConfig | None = None,
 ) -> None:
     start_time = time.time()
 
@@ -157,14 +189,17 @@ def save_inferences(
             pass
 
     batch_size = 1
-    time_length = model.time_length
+    time_length = autoregression_cfg.dataset_time_length
     loader = torch.utils.data.DataLoader(
         pin_memory=True,
         dataset=dataset,
         batch_size=batch_size,
         sampler=tasks,
     )
-
+    if autoregression_cfg is None:
+        num_autoregressions = 1
+    else:
+        num_autoregressions = autoregression_cfg.num_autoregressions
     for batch in tqdm.tqdm(loader, disable=rank != 0):
         if (config.min_samples > 0) and (
             writer.time_index * world_size > config.min_samples
@@ -181,23 +216,42 @@ def save_inferences(
             (frame_offsets_sec / 3600.0).unsqueeze(0).expand(batch_size, -1)
         )
         timestamps = first_frame_ts.unsqueeze(-1) + frame_offsets_sec.unsqueeze(0)
-
-        match config.mode:
-            case "save_data":
-                out, coords = model.denormalize(batch)
-            case "translate":
-                out, coords = model.translate(batch, dataset=config.translate_dataset)
-            case "infill":
-                out, coords = model.infill(batch)
-            case "sample":
-                out, coords = model.sample(
-                    batch,
-                    start_from_noisy_image=config.start_from_noisy_image,
-                    bf16=config.bf16,
+        autoregression_outputs = []
+        for autoregression_step in tqdm.tqdm(
+            range(num_autoregressions), disable=rank != 0, leave=False
+        ):
+            if num_autoregressions == 1:
+                batch_window = batch
+            else:
+                batch_window = extract_batch_for_single_autoregression(
+                    batch, autoregression_cfg, autoregression_step
                 )
-            case _:
-                raise NotImplementedError(config.mode)
 
+            match config.mode:
+                case "save_data":
+                    out, coords = model.denormalize(batch_window)
+                case "translate":
+                    out, coords = model.translate(
+                        batch_window, dataset=config.translate_dataset
+                    )
+                case "infill":
+                    out, coords = model.infill(batch_window)
+                case "sample":
+                    out, coords = model.sample(
+                        batch_window,
+                        start_from_noisy_image=config.start_from_noisy_image,
+                        bf16=config.bf16,
+                    )
+                case _:
+                    raise NotImplementedError(config.mode)
+            # save output in batch for auto-regression
+            batch["last_output"] = model.normalize(out)
+            if autoregression_step == 0:
+                autoregression_outputs.append(out)
+            else:
+                autoregression_outputs.append(out[:, :, 1:])
+
+        autoregression_outputs = torch.cat(autoregression_outputs, dim=2)
         if config.mode == "save_data":
             frame_source = torch.full((batch_size, time_length), 0, dtype=torch.int8)
         else:
@@ -208,7 +262,7 @@ def save_inferences(
             "frame_source_flag": frame_source,
             "lead_time": lead_time_hours,
         }
-        writer.write_target(out, coords, timestamps, scalars=scalars)
+        writer.write_target(autoregression_outputs, coords, timestamps, scalars=scalars)
 
     time_end = time.time()
     logger.info(
@@ -228,21 +282,34 @@ def main():
 
     sigma_max = args.sample.sigma_max
     sigma_min = args.sample.sigma_min
-    # Video model does not use MOE yet so just provide single path and no thresholds
-    model = cbottle.inference.CBottle3d.from_pretrained(
-        state_path,
-        sigma_min=sigma_min,
-        sigma_max=sigma_max,
-    )
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
-    # get slurm vars if present
-    id = int(os.getenv("SLURM_ARRAY_TASK_ID", "1"))  # 1-indexed
-    slurm_array_count = int(os.getenv("SLURM_ARRAY_TASK_COUNT", "1"))
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{rank}")
+    else:
+        device = torch.device("cpu")
 
-    rank = rank + world_size * (id - 1)
-    world_size = world_size * slurm_array_count
+    if args.state_path:
+        state_paths, sigma_thresholds = parse_model_paths(
+            args.state_path, args.sigma_thresholds
+        )
+
+        model = cbottle.inference.CBottle3d.from_pretrained(
+            state_paths,
+            sigma_thresholds=sigma_thresholds,
+            sigma_min=args.sample.sigma_min,
+            sigma_max=args.sample.sigma_max,
+            device=device,
+        )
+    else:
+        model = cbottle.inference.load(
+            "cbottle-3d-video",
+            root=args.checkpoint_root if args.checkpoint_root else None,
+            device=device,
+            sigma_min=args.sample.sigma_min,
+            sigma_max=args.sample.sigma_max,
+        )
 
     batch_info = model.coords.batch_info
     variables = dataset_3d.guess_variable_config(batch_info.channels)
@@ -262,6 +329,14 @@ def main():
             "AMIP dataset only supports unconditional frame selection strategy"
         )
 
+    autoregression_cfg = autoregressionRuntimeConfig(
+        enabled=args.sample.autoregression_enabled,
+        duration=args.sample.autoregression_duration,  # days
+        num_conditioning_frames=args.sample.autoregression_num_conditioning_frames,
+        model_time_length=time_length,
+        time_step=time_step,
+    )
+
     dataset = dataset_3d.get_dataset(
         split=args.data_split,
         dataset=args.dataset.name,
@@ -269,7 +344,7 @@ def main():
         infinite=False,
         shuffle=False,
         time_step=time_step,
-        time_length=time_length,
+        time_length=autoregression_cfg.dataset_time_length,
         frame_masker=frame_masker,
         variable_config=VARIABLE_CONFIGS[variables],
         map_style=True,
@@ -310,6 +385,8 @@ def main():
             f"\n  • frame_step:  {time_step} (hours)"
             f"\n  • masking:     {args.sample.frame_selection_strategy}"
             f"\n  • keep frames: {keep_frames_arr}"
+            f"\n  • total time length: {autoregression_cfg.dataset_time_length}"
+            f"\n  • number of autoregression steps: {autoregression_cfg.num_autoregressions}"
             "\n------------------------"
         )
 
@@ -323,6 +400,7 @@ def main():
         rank=rank,
         world_size=world_size,
         keep_frames=keep_frames_arr,
+        autoregression_cfg=autoregression_cfg,
     )
 
 
