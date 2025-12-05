@@ -29,7 +29,7 @@ from cbottle.training.video.frame_masker import FrameMasker
 from cbottle.datasets.merged_dataset import TimeMergedMapStyle
 from cbottle.netcdf_writer import NetCDFConfig, NetCDFWriter
 from cbottle.moe_utils import parse_model_paths
-from cbottle.autoregression import FrameSelectionStrategy, autoregressionRuntimeConfig
+from cbottle.autoregression import FrameSelectionStrategy, AutoregressionRuntimeConfig
 from inference_coarse import Dataset, Sampler, get_requested_times
 
 logger = logging.getLogger(__name__)
@@ -138,7 +138,7 @@ def save_inferences(
     rank: int,
     world_size: int,
     keep_frames: list[int] = [],
-    autoregression_cfg: autoregressionRuntimeConfig | None = None,
+    autoregression_cfg: AutoregressionRuntimeConfig | None = None,
 ) -> None:
     start_time = time.time()
 
@@ -329,7 +329,7 @@ def main():
             "AMIP dataset only supports unconditional frame selection strategy"
         )
 
-    autoregression_cfg = autoregressionRuntimeConfig(
+    autoregression_cfg = AutoregressionRuntimeConfig(
         enabled=args.sample.autoregression_enabled,
         duration=args.sample.autoregression_duration,  # days
         num_conditioning_frames=args.sample.autoregression_num_conditioning_frames,

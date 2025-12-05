@@ -41,7 +41,7 @@ class FrameSelectionStrategy(Enum):
 
 
 @dataclass
-class autoregressionRuntimeConfig:
+class AutoregressionRuntimeConfig:
     """
     Wrap all autoregression-related variables and provide helpers for derived parameters.
     This stays strictly focused on autoregressive autoregression settings.
