@@ -38,6 +38,29 @@ logger = logging.getLogger(__name__)
 def extract_batch_for_single_autoregression(
     batch, autoregression_cfg, autoregression_step
 ):
+    """
+    Extract a per-autoregression-window batch from a longer batch.
+
+    Parameters
+    ----------
+    batch : dict
+        A dictionary containing batched tensors for fields such as
+        "target", "condition", "second_of_day", "day_of_year", "labels",
+        "last_output", etc.
+        Time-dependent tensors are assumed to have time as the last dimension.
+    autoregression_cfg : AutoregressionRuntimeConfig
+        Configuration object defining start/end indices and conditioning frames.
+    autoregression_step : int
+        Index of the current autoregression step.
+
+    Returns
+    -------
+    dict
+        A new batch dictionary containing tensors sliced according to the
+        current autoregression window, and with the "condition" field updated
+        to include model outputs from previous steps when autoregression_step > 0.
+    """
+
     batch_window = {}
     start, end = autoregression_cfg.start_end_pairs[autoregression_step]
     num_conditioning_frames = autoregression_cfg.num_conditioning_frames
@@ -48,23 +71,20 @@ def extract_batch_for_single_autoregression(
         elif key in ["second_of_day", "day_of_year"]:
             batch_window[key] = value[:, start:end]
         elif key == "condition" and autoregression_step != 0:
-            if autoregression_step == 0:
-                batch_window[key] = value[:, :, start:end]
-            else:
-                condition_window = value[:, :, start:end]
-                num_channels = batch["target"].shape[1]
-                # set mask
-                condition_window[:, -1:, :num_conditioning_frames] = 1
-                # clear frame condition
-                condition_window[
-                    :,
-                    :num_channels,
-                ] = 0
-                # set frame condition
-                condition_window[:, :num_channels, :num_conditioning_frames] = batch[
-                    "last_output"
-                ][:, :, -num_conditioning_frames:]
-                batch_window[key] = condition_window
+            condition_window = value[:, :, start:end]
+            num_channels = batch["target"].shape[1]
+            # set mask
+            condition_window[:, -1:, :num_conditioning_frames] = 1
+            # clear frame condition
+            condition_window[
+                :,
+                :num_channels,
+            ] = 0
+            # set frame condition
+            condition_window[:, :num_channels, :num_conditioning_frames] = batch[
+                "last_output"
+            ][:, :, -num_conditioning_frames:]
+            batch_window[key] = condition_window
         # target or condition for the first autoregression step
         else:
             batch_window[key] = value[:, :, start:end]

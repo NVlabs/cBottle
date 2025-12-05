@@ -16,6 +16,8 @@
 import math
 from enum import auto, Enum
 from dataclasses import dataclass
+from functools import cached_property
+from typing import Tuple
 
 
 class FrameSelectionStrategy(Enum):
@@ -43,17 +45,18 @@ class FrameSelectionStrategy(Enum):
 @dataclass
 class AutoregressionRuntimeConfig:
     """
-    Wrap all autoregression-related variables and provide helpers for derived parameters.
-    This stays strictly focused on autoregressive autoregression settings.
-
-    duration: number of days of horizon you want to cover.
+    Configuration for autoregressive rollouts.
+    duration: number of days of horizon to cover.
+    num_conditioning_frames: number of frames to use as condition during rollout
+    model_time_length: temporal length of model's input
+    time_step: temporal interval in hours
     """
 
     enabled: bool
-    duration: int  # in days (0 or negative => no autoregression)
-    num_conditioning_frames: int  # N_overlap
-    model_time_length: int  # T
-    time_step: int  # hours between frames (Δt)
+    duration: int
+    num_conditioning_frames: int
+    model_time_length: int
+    time_step: int
 
     def __post_init__(self):
         if not (0 <= self.num_conditioning_frames < self.model_time_length):
@@ -62,15 +65,14 @@ class AutoregressionRuntimeConfig:
                 f"got {self.num_conditioning_frames}"
             )
 
-    def _compute_num_autoregressions(self) -> int:
-        """Internal logic for computing autoregression count."""
-        if not self.enabled:
+    @cached_property
+    def num_autoregressions(self) -> int:
+        """Number of autoregression windows K."""
+        if not self.enabled or self.duration <= 0:
             return 1
 
         T = self.model_time_length
-        N_overlap = self.num_conditioning_frames
-        delta = T - N_overlap
-
+        delta = T - self.num_conditioning_frames
         horizon_hours = self.duration * 24
 
         frames_needed = max(
@@ -84,39 +86,20 @@ class AutoregressionRuntimeConfig:
         k_minus_1 = math.ceil((frames_needed - T) / delta)
         return 1 + max(0, k_minus_1)
 
-    def _compute_dataset_time_length(self) -> int:
-        """Internal logic for computing dataset time length."""
+    @cached_property
+    def dataset_time_length(self) -> int:
+        """Total frames needed by the dataset."""
         T = self.model_time_length
         delta = T - self.num_conditioning_frames
         return T + (self.num_autoregressions - 1) * delta
 
-    def _compute_start_end_pairs(self) -> int:
-        """Internal logic for computing start and end indices of each autoregression step"""
+    @cached_property
+    def start_end_pairs(self) -> Tuple[Tuple[int, int], ...]:
+        """(start, end) frame indices for each autoregression step."""
         pairs = []
         delta = self.model_time_length - self.num_conditioning_frames
-        for index_autoregression in range(self.num_autoregressions):
-            pairs.append(
-                [
-                    index_autoregression * delta,
-                    index_autoregression * delta + self.model_time_length,
-                ]
-            )
-        return pairs
-
-    # -------------------------------------------------------------
-    # Public properties
-    # -------------------------------------------------------------
-    @property
-    def num_autoregressions(self) -> int:
-        """Number of autoregression windows K."""
-        return self._compute_num_autoregressions()
-
-    @property
-    def dataset_time_length(self) -> int:
-        """Total number of frames required by the dataset."""
-        return self._compute_dataset_time_length()
-
-    @property
-    def start_end_pairs(self) -> int:
-        """Number of autoregression windows K."""
-        return self._compute_start_end_pairs()
+        for k in range(self.num_autoregressions):
+            start = k * delta
+            end = start + self.model_time_length
+            pairs.append((start, end))
+        return tuple(pairs)
