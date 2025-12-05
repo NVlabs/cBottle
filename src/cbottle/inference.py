@@ -208,7 +208,7 @@ class CBottle3d:
         device = next(self.net.parameters()).device
         return device
 
-    def infill(self, batch: dict) -> tuple[torch.Tensor, Coords]:
+    def infill(self, batch: dict, bf16: bool = True) -> tuple[torch.Tensor, Coords]:
         """
         Perform infilling on batch with NaN values.
         Args:
@@ -281,21 +281,22 @@ class CBottle3d:
 
         # Run infilling sampling
         with torch.no_grad():
-            out = edm_sampler_from_sigma(
-                D,
-                latents,
-                randn_like=torch.randn_like,
-                sigma_max=self.sigma_max,
-                sigma_min=self.sigma_min,
-                num_steps=self.num_steps,
-            )
+            with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
+                out = edm_sampler_from_sigma(
+                    D,
+                    latents,
+                    randn_like=torch.randn_like,
+                    sigma_max=self.sigma_max,
+                    sigma_min=self.sigma_min,
+                    num_steps=self.num_steps,
+                )
 
         # Post-process the output
         out = self._post_process(out)
 
         return out, Coords(self.batch_info, self.output_grid)
 
-    def _encode(self, batch: dict) -> dict:
+    def _encode(self, batch: dict, bf16: bool = True) -> dict:
         batch = self._move_to_device(batch)
 
         images, labels, condition = batch["target"], batch["labels"], batch["condition"]
@@ -324,17 +325,17 @@ class CBottle3d:
         D.sigma_min = self.sigma_min
         D.sigma_max = self.sigma_max
         D.round_sigma = lambda x: x
-
-        encoded = edm_sampler_from_sigma(
-            D,
-            y0,
-            sigma_max=self.sigma_max,
-            sigma_min=self.sigma_min,
-            num_steps=self.num_steps,
-            randn_like=torch.randn_like,
-            reverse=True,
-            S_noise=0,
-        )
+        with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
+            encoded = edm_sampler_from_sigma(
+                D,
+                y0,
+                sigma_max=self.sigma_max,
+                sigma_min=self.sigma_min,
+                num_steps=self.num_steps,
+                randn_like=torch.randn_like,
+                reverse=True,
+                S_noise=0,
+            )
 
         # add noise for missing channels
         encoded = encoded.where(mask, torch.randn_like(encoded) * self.sigma_max)
@@ -348,6 +349,7 @@ class CBottle3d:
         batch: dict,
         dataset: Literal["era5", "icon"],
         dataset_when_nan: str = "icon",
+        bf16: bool = True,
     ) -> dict:
         batch = self._move_to_device(batch)
 
@@ -393,15 +395,16 @@ class CBottle3d:
             raise ValueError(dataset)
 
         output = batch.copy()
-        output["target"] = edm_sampler_from_sigma(
-            denoiser,
-            images,
-            sigma_max=self.sigma_max,
-            sigma_min=self.sigma_min,
-            randn_like=torch.randn_like,
-            num_steps=self.num_steps,
-            S_noise=0,
-        )
+        with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
+            output["target"] = edm_sampler_from_sigma(
+                denoiser,
+                images,
+                sigma_max=self.sigma_max,
+                sigma_min=self.sigma_min,
+                randn_like=torch.randn_like,
+                num_steps=self.num_steps,
+                S_noise=0,
+            )
         return output
 
     def to_icon(self, batch: dict) -> tuple[torch.Tensor, Coords]:
@@ -420,8 +423,8 @@ class CBottle3d:
         self, batch: dict, dataset: Literal["icon", "era5"]
     ) -> tuple[torch.Tensor, Coords]:
         # Move all tensors to the correct device
-        encoded = self._encode(batch)
         with torch.no_grad():
+            encoded = self._encode(batch)
             out = self._decode(encoded, dataset)["target"]
         out = self._post_process(out)
         return out, Coords(self.batch_info, self.output_grid)
@@ -433,7 +436,7 @@ class CBottle3d:
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
 
-    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
         """
         Unpost-process the output by normalizing.
         """
@@ -682,7 +685,7 @@ class CBottle3d:
             batch,
             guidance_pixels=indices_where_tc,
         )
-        out = self._normalize(out)
+        out = self.normalize(out)
         out = self._reorder(out)
 
         batch["target"] = out

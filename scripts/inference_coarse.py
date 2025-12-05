@@ -24,6 +24,7 @@ from cbottle.dataclass_parser import Help, a, parse_args
 from cbottle.datasets import dataset_3d, samplers
 from cbottle.datasets.dataset_3d import VARIABLE_CONFIGS
 from cbottle.netcdf_writer import NetCDFConfig, NetCDFWriter
+from cbottle.moe_utils import parse_model_paths
 import cbottle.inference
 import numpy as np
 import warnings
@@ -100,18 +101,6 @@ def parse_tc_location(tc_location: str):
         lats, lons = zip(*coords)
         return lats, lons
     return None, None
-
-
-def parse_model_paths(
-    model_paths: str, sigma_thresholds: str
-) -> tuple[list[str], list[float]]:
-    """Parse comma-separated model paths and sigma thresholds."""
-    state_paths = [s.strip() for s in model_paths.split(",")]
-    sigma_thresholds = (
-        [float(tok) for tok in sigma_thresholds.split(",")] if sigma_thresholds else []
-    )
-    sigma_thresholds = sigma_thresholds[: len(state_paths) - 1]
-    return state_paths, sigma_thresholds
 
 
 def get_requested_times(args):
