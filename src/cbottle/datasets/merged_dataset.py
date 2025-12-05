@@ -253,14 +253,50 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         self.frame_step = frame_step
         self._loader = _MergedLoader(time_loaders)
 
+        # number of frames used in one window
+        self._frames_per_window = (self.time_length - 1) * self.frame_step + 1
+
         # can only use idxs that can create a full window
-        frames_per_window = (self.time_length - 1) * self.frame_step + 1
-        self.valid_length = len(times) - frames_per_window + 1
+        self.valid_length = len(times) - self._frames_per_window + 1
         if self.valid_length <= 0:
             raise ValueError(
-                f"Dataset too small for window length. Need {frames_per_window} "
+                f"Dataset too small for window length. Need {self._frames_per_window} "
                 f"frames but only got {len(times)}"
             )
+
+        # by default, all possible start indices are valid
+        self._start_indices = list(range(self.valid_length))
+
+    def set_times(self, requested_times):
+        """
+        Restrict the dataset to only use windows whose *first* frame time
+        is in `requested_times`.
+
+        `requested_times` refers to the first frame only; subsequent frames
+        in the window are still taken from the full underlying `self.times`.
+        """
+        # Map times → positions in the original self.times
+        base_index = pd.Index(self.times)
+        indexer = base_index.get_indexer(requested_times)
+
+        # Handle times that are not found
+        missing = [t for t, i in zip(requested_times, indexer) if i < 0]
+        if missing:
+            raise KeyError(f"Requested times not found in dataset: {missing}")
+
+        # Ensure each requested start can form a full window
+        max_start = len(self.times) - self._frames_per_window  # inclusive
+        start_indices = [i for i in indexer if i <= max_start]
+
+        if not start_indices:
+            raise ValueError(
+                "No requested times can form a full window with "
+                f"time_length={self.time_length}, frame_step={self.frame_step}."
+            )
+
+        # Sort to keep deterministic ordering
+        self._start_indices = sorted(start_indices)
+        self.valid_length = len(self._start_indices)
 
     def __len__(self):
         return self.valid_length
@@ -271,8 +307,13 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
                 f"Index {idx} out of bounds for dataset of length {self.valid_length}"
             )
 
+        # Map dataset index → actual start index in self.times
+        start = self._start_indices[idx]
+
         frame_idxs = range(
-            idx, idx + self.time_length * self.frame_step, self.frame_step
+            start,
+            start + self.time_length * self.frame_step,
+            self.frame_step,
         )
 
         window_times = self.times[list(frame_idxs)]

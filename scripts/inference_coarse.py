@@ -24,6 +24,7 @@ from cbottle.dataclass_parser import Help, a, parse_args
 from cbottle.datasets import dataset_3d, samplers
 from cbottle.datasets.dataset_3d import VARIABLE_CONFIGS
 from cbottle.netcdf_writer import NetCDFConfig, NetCDFWriter
+from cbottle.moe_utils import parse_model_paths
 import cbottle.inference
 import numpy as np
 import warnings
@@ -201,9 +202,9 @@ def main():
     warnings.filterwarnings("ignore", "Cannot do a zero-copy NCHW to NHWC")
     args = parse_args(CLI, convert_underscore_to_hyphen=False)
 
-    state_paths = [s.strip() for s in args.state_path.split(",")]
-    sigma_thresholds = [float(tok) for tok in args.sigma_thresholds.split(",")]
-    sigma_thresholds = sigma_thresholds[: len(state_paths) - 1]
+    state_paths, sigma_thresholds = parse_model_paths(
+        args.state_path, args.sigma_thresholds
+    )
 
     if args.sample.tc_location:
         tc_lats, tc_lons = parse_tc_location(args.sample.tc_location)
