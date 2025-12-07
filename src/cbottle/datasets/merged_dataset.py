@@ -27,7 +27,7 @@ from cbottle.models.distributed import compute_t_split
 logger = logging.getLogger(__name__)
 
 
-def _get_worker_info() -> str:
+def _get_worker_info(model_rank: int = 0) -> str:
     """Get worker identification string for debugging."""
     worker_info = torch.utils.data.get_worker_info()
     worker_id = worker_info.id if worker_info else 0
@@ -42,7 +42,7 @@ def _get_worker_info() -> str:
             rank = 0
     except Exception as _:
         rank = 0
-    return f"r{rank}/w{worker_id}/p{pid}"
+    return f"r{rank}/w{worker_id}/p{pid}/m{model_rank}"
 
 
 class _FrameIndexGenerator:
@@ -432,21 +432,21 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         for i in frame_idxs:
             if not (self._cache_start <= i < self._cache_end):
                 # Cache miss - log detailed debug info
-                prev_cache_id = self._cache_id
-                prev_range = f"[{self._cache_start}:{self._cache_end})"
-                new_cache_id = (i - self._cache_offset) // self.cache_chunk_size
+                # prev_cache_id = self._cache_id
+                # prev_range = f"[{self._cache_start}:{self._cache_end})"
+                # new_cache_id = (i - self._cache_offset) // self.cache_chunk_size
 
-                worker_info = _get_worker_info()
-                hits_str = (
-                    f"after {self._cache_hits} hits"
-                    if self._cache_hits
-                    else "cold start"
-                )
-                print(
-                    f"[Cache {worker_info}] MISS {hits_str} | "
-                    f"frame={i} cache_id={prev_cache_id}->{new_cache_id} "
-                    f"range={prev_range} offset={self._cache_offset} chunk={self.cache_chunk_size}"
-                )
+                # worker_info = _get_worker_info(self.model_rank)
+                # hits_str = (
+                #     f"after {self._cache_hits} hits"
+                #     if self._cache_hits
+                #     else "cold start"
+                # )
+                # print(
+                #     f"[Cache {worker_info}] MISS {hits_str} | "
+                #     f"frame={i} cache_id={prev_cache_id}->{new_cache_id} "
+                #     f"range={prev_range} offset={self._cache_offset} chunk={self.cache_chunk_size}"
+                # )
                 self._cache_hits = 0
 
                 self._cache_start = (

@@ -15,11 +15,15 @@
 import abc
 import copy
 import dataclasses
+import glob
 import json
 import gc
 import os
 import pickle
 import random
+import re
+import shutil
+import signal
 import time
 import warnings
 from functools import partial
@@ -30,6 +34,7 @@ import cbottle.config.models
 import cbottle.models
 import cbottle.checkpointing
 import cbottle.profiling
+from cbottle.signals import finish_before_quitting, QuitEarly, handler
 import numpy as np
 import psutil
 import torch
@@ -37,12 +42,10 @@ import torch.utils.tensorboard
 from cbottle import distributed as dist
 from cbottle import training_stats
 from cbottle.training import utils as misc
-from cbottle.training.event_log import SAVE_NETWORK_SNAPSHOT, EventLog
-from cbottle.datasets.base import SpatioTemporalDataset
+from cbottle.datasets.base import SpatioTemporalDataset, BatchInfo
 
 DATASET_METADATA_FILENAME = "dataset-metadata.pth"
 TRAINER_METADATA_FILENAME = "loop.json"
-EVENT_LOG_FILE = "events.jsonl"
 
 
 def _to_batch(x, device):
@@ -70,6 +73,29 @@ def _format_time(seconds: Union[int, float]) -> str:
         return "{0}d {1:02}h {2:02}m".format(
             s // (24 * 60 * 60), (s // (60 * 60)) % 24, (s // 60) % 60
         )
+
+
+class CheckpointHandler:
+    def __init__(self, run_dir, filename: str = "training-state-{}.checkpoint"):
+        self.filename = filename
+        self.run_dir = run_dir
+
+    def get_filename(self, nimg):
+        return self.filename.format("%09d" % nimg)
+
+    def get_path(self, nimg):
+        return os.path.join(self.run_dir, self.get_filename(nimg))
+
+    def list_checkpoints(self, run_dir=None):
+        run_dir = run_dir or self.run_dir
+        files = glob.glob(self.filename.format("*"), root_dir=run_dir)
+        pattern = self.filename.format(r"(\d{9})")
+        files = sorted(files)
+        for file in files:
+            m = re.match(pattern, file)
+            if m:
+                nimg = int(m.group(1))
+                yield os.path.join(run_dir, file), nimg
 
 
 @dataclasses.dataclass
@@ -193,7 +219,6 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         dist.print0(" ".join(fields))
 
     def setup_logs(self):
-        self.event_log = EventLog(os.path.join(self.run_dir, EVENT_LOG_FILE))
         self.writer = torch.utils.tensorboard.SummaryWriter(self.run_dir)
 
     @property
@@ -345,6 +370,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         return min(cur_nimg / max(self.lr_rampup_img, 1e-8), 1.0)
 
     @cbottle.profiling.nvtx
+    @finish_before_quitting
     def step_optimizer(self, cur_nimg):
         # Update weights.
         torch.cuda.nvtx.range_push("training_loop:step")
@@ -385,10 +411,9 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         pass
 
     def validate_all_checkpoints(self):
-        event_log = EventLog(os.path.join(self.run_dir, EVENT_LOG_FILE))
-        for training_state_file, nimg in event_log.states():
+        for path, nimg in self._state_checkpoint_handler.list_checkpoints():
             self.cur_nimg = nimg
-            self.resume_from_state(os.path.join(self.run_dir, training_state_file))
+            self.resume_from_state(path)
             self.validate(self.net)
             self.flush_training_stats()
 
@@ -420,41 +445,46 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
 
     @cbottle.profiling.nvtx
     def save_network_snapshot(self, cur_nimg):
-        data = dict(
-            ema=self.ema,
-            loss_fn=self.loss_fn,
-            dataset_kwargs=dict(getattr(self, "dataset_kwargs", {})),
-        )
+        if dist.get_rank() != 0:
+            return
 
-        for key, value in data.items():
-            if isinstance(value, torch.nn.Module):
-                value = copy.deepcopy(value).eval().requires_grad_(False)
-                misc.check_ddp_consistency(value)
-                data[key] = value.cpu()
-            del value  # conserve memory
-        if dist.get_rank() == 0:
-            snapshot_filename = f"network-snapshot-{cur_nimg:09d}.pkl"
-            self.event_log.log_network_snapshot(snapshot_filename, cur_nimg)
-            with open(os.path.join(self.run_dir, snapshot_filename), "wb") as f:
-                pickle.dump(data, f)
+        filename = self._snapshot_checkpoint_handler.get_path(cur_nimg)
+        dist.print0(f"Saving network snapshot to {filename}")
+        self._save_checkpoint(filename, optimizer=False)
+
+    @property
+    def batch_info(self) -> None | BatchInfo:
+        return None
 
     @cbottle.profiling.nvtx
-    def save_training_state(self, cur_nimg):
-        state_filename = f"training-state-{cur_nimg:09d}.checkpoint"
-        self.event_log.log_training_state(state_filename, cur_nimg)
-        with cbottle.checkpointing.Checkpoint(
-            os.path.join(self.run_dir, state_filename), "w"
-        ) as checkpoint:
+    @finish_before_quitting
+    def _save_checkpoint(self, path, optimizer: bool):
+        tmppath = path + ".tmp" + str(os.getpid())
+        with cbottle.checkpointing.Checkpoint(tmppath, "w") as checkpoint:
             checkpoint.write_model(self.net)
-            checkpoint.write_batch_info(self.dataset_obj.batch_info)
-            with checkpoint.open("optimizer_state.pth", "w") as f:
-                torch.save(self.optimizer.state_dict(), f)
+            if self.batch_info is not None:
+                checkpoint.write_batch_info(self.batch_info)
+
+            if optimizer:
+                with checkpoint.open("optimizer_state.pth", "w") as f:
+                    torch.save(self.optimizer.state_dict(), f)
 
             with checkpoint.open("loop.json", "w") as f:
                 f.write(self.dumps().encode())
 
             if self.model_config is not None:
                 checkpoint.write_model_config(self.model_config)
+        shutil.move(tmppath, path)
+
+    @cbottle.profiling.nvtx
+    def save_training_state(self, cur_nimg):
+        if dist.get_rank() != 0:
+            return
+
+        state_filename = self._state_checkpoint_handler.get_path(cur_nimg)
+        dist.print0(f"Saving checkpoint to {state_filename}")
+        self._save_checkpoint(state_filename, optimizer=True)
+        dist.print0(f"Checkpoint saved to {state_filename}")
 
     def flush_training_stats(self):
         training_stats.default_collector.update()
@@ -524,23 +554,40 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         self.setup_batching()
         self.optimizer = self.get_optimizer(self.net.parameters())
 
-    def resume_from_rundir(self, run_dir=None, require_all=True):
-        run_dir = run_dir or self.run_dir
-        event_log = EventLog(os.path.join(run_dir, EVENT_LOG_FILE))
-        training_state_file, nimg = event_log.last_state()
-        training_state = os.path.join(run_dir, training_state_file)
+        self._state_checkpoint_handler = CheckpointHandler(self.run_dir)
+        self._snapshot_checkpoint_handler = CheckpointHandler(
+            self.run_dir, "network-snapshot-{}.checkpoint"
+        )
 
-        resume_pkl = ""
-        for event in event_log.query(SAVE_NETWORK_SNAPSHOT):
-            if event["nimg"] == nimg:
-                resume_pkl = os.path.join(run_dir, event["filename"])
+    def resume_from_rundir(self, run_dir=None, require_all=True):
+        checkpoint_info = None
+
+        # Hacky: if run_dir is actually a direct checkpoint path, parse it directly
+        if run_dir and run_dir.endswith(".checkpoint"):
+            import re
+
+            match = re.search(r"training-state-(\d+)\.checkpoint", run_dir)
+            nimg = int(match.group(1)) if match else 0
+            checkpoint_info = (run_dir, nimg)
+        else:
+            for checkpoint_info in self._state_checkpoint_handler.list_checkpoints(
+                run_dir
+            ):
+                pass
+
+        # now training_state and nimg are the final checkpoints
+        if checkpoint_info is None:
+            raise FileNotFoundError("No checkpoint file found in {run_dir}.")
+
+        path, nimg = checkpoint_info
 
         self.cur_nimg = nimg
+        self.resume_from_state(path, require_all=require_all)
+        self._sync_sampler_epoch()  # Update sampler state for resumed cur_nimg
 
-        if resume_pkl:
-            self.resume_from_snapshot(resume_pkl, init_net_from_ema=False)
-
-        self.resume_from_state(training_state, require_all=require_all)
+    def _sync_sampler_epoch(self):
+        """Hook for subclasses to update sampler epoch after resume."""
+        pass
 
     def _set_random_seeds(self):
         """Set random seeds for reproducibility.
@@ -558,22 +605,43 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         """Initialize timing stats for step-level debugging."""
         self._step_times = []
         self._step_count = 0
+        self._train_start_time = time.time()
 
-    def _log_step_timing(self, step_time: float, loss_val: float = None):
+    def _log_step_timing(self, step_time: float, loss_val: float):
         self._step_times.append(step_time)
         self._step_count += 1
-        avg_time = sum(self._step_times) / len(self._step_times)
+        avg_step = sum(self._step_times) / len(self._step_times)
+        total_elapsed = time.time() - self._train_start_time
+        avg_total = total_elapsed / self._step_count
 
         if dist.get_rank() != 0:
             return
 
-        loss_str = f"  loss={loss_val:.2f}" if loss_val is not None else ""
+        lr = self.optimizer.param_groups[0]["lr"]
         print(
             f"[Step {self._step_count:>5}]  "
-            f"time={step_time:.2f}s  avg={avg_time:.2f}s{loss_str}"
+            f"time={step_time:.2f}s  avg={avg_step:.2f}s  total_avg={avg_total:.2f}s  "
+            f"loss={loss_val:.2f}  lr={lr:.3e}"
         )
 
     def train(self):
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
+        try:
+            self._train()
+        except QuitEarly as e:
+            dist.print0(f"Caught {e}. Quitting early.")
+            self.save_training_state(self.cur_nimg)
+        finally:
+            try:
+                del self.train_loader
+                del self.valid_loader
+            except AttributeError:
+                pass
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
+
+    def _train(self):
         # Initialize.
         dist.print0("Loss function", self.loss_fn)
         start_time = time.time()
@@ -617,10 +685,8 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                 cur_tick % self.snapshot_ticks == 0
             ):
                 self.save_network_snapshot(self.cur_nimg)
-            if (
-                (self.state_dump_ticks is not None)
-                and (cur_tick % self.state_dump_ticks == 0)
-                and dist.get_rank() == 0
+            if (self.state_dump_ticks is not None) and (
+                cur_tick % self.state_dump_ticks == 0
             ):
                 self.save_training_state(self.cur_nimg)
 
@@ -632,5 +698,5 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
             maintenance_time = tick_start_time - tick_end_time
 
         # Done.
-        dist.print0()
+        self.save_training_state(self.cur_nimg)
         dist.print0("Exiting...")

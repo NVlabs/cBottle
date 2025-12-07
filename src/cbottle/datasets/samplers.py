@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
+import os
 import random
 
 import torch
@@ -127,6 +128,7 @@ class ChunkedDistributedSampler(torch.utils.data.Sampler):
         drop_last=True,
         seed=42,
         sampler_fn=None,
+        subsampled_chunk_size=None,
     ):
         """
         Args:
@@ -146,7 +148,6 @@ class ChunkedDistributedSampler(torch.utils.data.Sampler):
             seed = torch.tensor(seed).cuda()
             torch.distributed.broadcast(seed, src=0)
             seed = seed.item()
-
         self._chunk_sampler = (
             sampler_fn(chunks)
             if sampler_fn is not None
@@ -167,16 +168,41 @@ class ChunkedDistributedSampler(torch.utils.data.Sampler):
         self.index_within_chunk = 0
         self._chunk_iter = iter(self._chunk_sampler)
         self._current_chunk_indices = None
+        self.subsampled_chunk_size = (
+            subsampled_chunk_size if subsampled_chunk_size is not None else chunk_size
+        )
 
         if self.shuffle_within_chunk:
             self.rng = random.Random(seed + rank)
 
+        # Logging state
+        self._chunk_count = 0  # Chunks processed in current epoch
+        self._total_chunks = 0  # Total chunks processed across all epochs
+        self._log_every_n_chunks = (
+            50  # Log every N chunks (set to 1 for full verbosity)
+        )
+
+        # print(f"[Sampler r={rank} pid={os.getpid()}] Init: n={self.n}, nchunks={nchunks}, "
+        #       f"chunk_size={chunk_size}, chunks_per_replica~={nchunks // num_replicas}. Shuffle within chunk: {shuffle_within_chunk}")
+
     def set_epoch(self, epoch):
+        old_epoch = self.epoch
         try:
             self._chunk_sampler.set_epoch(epoch)
         except AttributeError:
             pass
         self.epoch = epoch
+        self.index_within_chunk = 0
+        self._chunk_iter = iter(self._chunk_sampler)
+
+        if self.shuffle_within_chunk:
+            self.rng = random.Random(self.seed + self.rank + epoch * 100003)
+
+        print(
+            f"[Sampler r={self.rank} pid={os.getpid()}] set_epoch: {old_epoch} -> {epoch} "
+            f"(processed {self._chunk_count} chunks in prev epoch, {self._total_chunks} total)"
+        )
+        self._chunk_count = 0
 
     def __len__(self):
         return self.n
@@ -189,8 +215,7 @@ class ChunkedDistributedSampler(torch.utils.data.Sampler):
             try:
                 self.active_chunk = next(self._chunk_iter)
             except StopIteration:
-                self.set_epoch(self.epoch + 1)  # reset sampler's rng
-                self._chunk_iter = iter(self._chunk_sampler)
+                self.set_epoch(self.epoch + 1)
                 raise StopIteration()
 
             chunk_start = self.active_chunk * self.chunk_size
@@ -198,8 +223,19 @@ class ChunkedDistributedSampler(torch.utils.data.Sampler):
                 range(chunk_start, chunk_start + self.chunk_size)
             )
 
+            # original_indices = self._current_chunk_indices[:10]
+
             if self.shuffle_within_chunk:
                 self.rng.shuffle(self._current_chunk_indices)
+
+            self._current_chunk_indices = self._current_chunk_indices[
+                : self.subsampled_chunk_size
+            ]
+
+            self._chunk_count += 1
+            self._total_chunks += 1
+
+            # shuffled_indices = self._current_chunk_indices[:10]
 
         i = self._current_chunk_indices[self.index_within_chunk]
         self.index_within_chunk = (self.index_within_chunk + 1) % self.chunk_size

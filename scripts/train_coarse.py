@@ -139,6 +139,14 @@ class TrainingLoop(loop.TrainingLoopBase):
     def __post_init__(self):
         super().__post_init__()
         self._device_mesh = None
+        self._train_samplers = None
+
+    def _sync_sampler_epoch(self):
+        """Set sampler epoch based on cur_nimg for deterministic resumption."""
+        if self._train_samplers is None:
+            return
+        for sampler in self._train_samplers:
+            sampler.set_epoch(self.cur_nimg)
 
     @property
     def variable_config(self) -> VariableConfig:
@@ -453,6 +461,7 @@ class TrainingLoop(loop.TrainingLoopBase):
             num_loaders = max(workers, 1)
             dataloaders = []
 
+            samplers_list = []
             for worker_id in range(num_loaders):
                 worker_sampler = ChunkedDistributedSampler(
                     dataset,
@@ -462,8 +471,9 @@ class TrainingLoop(loop.TrainingLoopBase):
                     shuffle=train,
                     shuffle_within_chunk=train,
                     drop_last=True,
-                    seed=self.cur_nimg,
+                    seed=self.seed,
                 )
+                samplers_list.append(worker_sampler)
                 worker_loader = self._create_dataloader(
                     dataset,
                     batch_size=batch_size,
@@ -473,7 +483,15 @@ class TrainingLoop(loop.TrainingLoopBase):
                 )
                 dataloaders.append(worker_loader)
 
-            return RoundRobinLoader(dataloaders)
+            loader = RoundRobinLoader(
+                dataloaders,
+                shuffle_order=True,
+                shuffle_every=1,
+                seed=self.seed + cfg.data_rank,
+            )
+            if train:
+                self._train_samplers = samplers_list
+            return loader
 
         sampler = samplers.distributed_split(
             samplers.subsample(
@@ -600,7 +618,31 @@ class TrainingLoop(loop.TrainingLoopBase):
         model_group = self._device_mesh.get_group(1)
         device = torch.device("cuda")
 
-        # Generate one test value from each RNG (minimal consumption)
+        # Check Python random state matches
+        py_state = random.getstate()[1][:4]
+        state_check = torch.tensor(py_state, device=device, dtype=torch.int64)
+        state_gather = [torch.empty_like(state_check) for _ in range(model_world_size)]
+        torch.distributed.all_gather(state_gather, state_check, group=model_group)
+        for i, s in enumerate(state_gather[1:], 1):
+            if not torch.equal(state_gather[0], s):
+                raise ValueError(
+                    f"Python random state mismatch! Rank 0: {state_gather[0].tolist()}, Rank {i}: {s.tolist()}"
+                )
+
+        # Check numpy random state matches (first 4 values of MT19937 state array)
+        np_state = np.random.get_state()[1][:4]
+        np_state_check = torch.tensor(np_state, device=device, dtype=torch.int64)
+        np_state_gather = [
+            torch.empty_like(np_state_check) for _ in range(model_world_size)
+        ]
+        torch.distributed.all_gather(np_state_gather, np_state_check, group=model_group)
+        for i, s in enumerate(np_state_gather[1:], 1):
+            if not torch.equal(np_state_gather[0], s):
+                raise ValueError(
+                    f"Numpy random state mismatch! Rank 0: {np_state_gather[0].tolist()}, Rank {i}: {s.tolist()}"
+                )
+
+        # Generate one test value from each RNG
         test_vals = torch.tensor(
             [
                 torch.randn(1, device=device).item(),
@@ -644,6 +686,35 @@ class TrainingLoop(loop.TrainingLoopBase):
 
         # Check sigma is identical across MP ranks (RNG sync check)
         self._check_mp_sigma(loss.sigma)
+
+        if self.distributed_config.model_rank == 0:
+            try:
+                sigma_vals = loss.sigma.squeeze().cpu().tolist()
+                if isinstance(sigma_vals, float):
+                    sigma_vals = [sigma_vals]
+                sigma_str = ", ".join(f"{s:.4f}" for s in sigma_vals[:8])
+                if len(sigma_vals) > 8:
+                    sigma_str += f"... ({len(sigma_vals)} total)"
+                print(f"[Sigma] batch sigmas: [{sigma_str}]")
+            except Exception as e:
+                print(f"[Sigma] error logging sigmas: {e}. {loss.sigma}")
+
+            if timestamp is not None:
+                try:
+                    import datetime
+
+                    raw_vals = [t.item() for t in timestamp[:4]]
+                    ts_strs = [
+                        datetime.datetime.fromtimestamp(
+                            raw, datetime.timezone.utc
+                        ).strftime("%Y-%m-%d %H:%M")
+                        for raw in raw_vals
+                    ]
+                    print(
+                        f"[Batch] timestamps raw={raw_vals[:2]} decoded={ts_strs}{'...' if len(timestamp) > 4 else ''}"
+                    )
+                except Exception as e:
+                    print(f"[Batch] error logging timestamps: {e}. raw={timestamp}")
 
         training_stats.report("Loss/denoising", loss.denoising)
         self._train_sigma_metric.update(loss.sigma, loss.denoising)
@@ -924,7 +995,9 @@ class TrainingLoop(loop.TrainingLoopBase):
             test_time = time.time() - test_start
 
             # Log likelihood is expensive for video - only compute on first batch
-            if batch_num == 0 or self.time_length == 1:
+            if self.model_parallel == 1 and (
+                (batch_num % 2 == 0) or self.time_length == 1
+            ):
                 ll_start = time.time()
                 with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
                     self._report_log_likelihood(net, batch)
@@ -969,23 +1042,35 @@ class TrainingLoop(loop.TrainingLoopBase):
         gather_start = time.time()
         if cfg.model_world_size > 1:
             model_group = self._device_mesh.get_group(1)
+            t_splits = compute_t_split(self.time_length, cfg.model_world_size)
 
-            # Gather ring_images: (B, C, T_local, X) -> (B, C, T_full, X)
+            b, c, _, x = ring_images.shape
             ring_list = [
-                torch.empty_like(ring_images) for _ in range(cfg.model_world_size)
+                torch.empty(
+                    (b, c, t_splits[r], x),
+                    device=ring_images.device,
+                    dtype=ring_images.dtype,
+                )
+                for r in range(cfg.model_world_size)
             ]
             torch.distributed.all_gather(
                 ring_list, ring_images.contiguous(), group=model_group
             )
             full_ring_images = torch.cat(ring_list, dim=2)
 
-            # Gather d: stack all fields, one all_gather, then unstack
-            # Each field is (B, T_local, X) -> stack to (num_fields, B, T_local, X)
             field_names = list(d.keys())
             stacked_d = torch.stack(
                 [d[f] for f in field_names], dim=0
             )  # (F, B, T_local, X)
-            d_list = [torch.empty_like(stacked_d) for _ in range(cfg.model_world_size)]
+            f_dim, b, _, x = stacked_d.shape
+            d_list = [
+                torch.empty(
+                    (f_dim, b, t_splits[r], x),
+                    device=stacked_d.device,
+                    dtype=stacked_d.dtype,
+                )
+                for r in range(cfg.model_world_size)
+            ]
             torch.distributed.all_gather(
                 d_list, stacked_d.contiguous(), group=model_group
             )
@@ -1070,6 +1155,7 @@ class CLI:
     validate_only: bool = False
     validate_all: bool = False
     resume_dir: str = ""
+    resume_checkpoint: str = ""
     test_fast: bool = False
     regression: bool = False
 
@@ -1117,6 +1203,20 @@ def main():
         loop.lr = 0.0001
         loop.batch_size = loop.batch_gpu * data_world_size
         loop.steps_per_tick = 1000
+    loop.valid_min_samples = max(loop.valid_min_samples, 64)
+    loop.steps_per_tick = max(loop.steps_per_tick, 4000)
+    if loop.model_parallel == 1:
+        loop.steps_per_tick = 3250
+    loop.era5_chunk_size = min(loop.era5_chunk_size, 24)
+
+    # Reduce dataloader workers for large GPU counts to avoid S3 rate limiting
+    total_gpus = dist.get_world_size()
+    if total_gpus >= 64:
+        loop.dataloader_num_workers = min(loop.dataloader_num_workers, 4)
+        loop.dataloader_prefetch_factor = min(loop.dataloader_prefetch_factor, 8)
+        print(
+            f"Large scale run ({total_gpus} GPUs): reduced workers={loop.dataloader_num_workers}, prefetch={loop.dataloader_prefetch_factor}"
+        )
 
     print("Training with:", loop)
     loop.setup()
@@ -1133,6 +1233,11 @@ def main():
             break
         except FileNotFoundError:
             pass
+
+    if new_training and cli.resume_checkpoint:
+        loop.resume_from_rundir(cli.resume_checkpoint, require_all=False)
+        new_training = False
+        print(f"Resumed from checkpoint: {cli.resume_checkpoint}")
 
     if new_training:
         print("Starting new training")
