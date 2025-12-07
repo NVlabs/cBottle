@@ -18,12 +18,31 @@ import math
 import pandas as pd
 import numpy as np
 import asyncio
+import os
 from typing import Callable
 import cbottle.datetime
 import logging
 from cbottle.models.distributed import compute_t_split
 
 logger = logging.getLogger(__name__)
+
+
+def _get_worker_info() -> str:
+    """Get worker identification string for debugging."""
+    worker_info = torch.utils.data.get_worker_info()
+    worker_id = worker_info.id if worker_info else 0
+    pid = os.getpid()
+    # Try to get distributed rank if available
+    try:
+        import torch.distributed as dist
+
+        if dist.is_initialized():
+            rank = dist.get_rank()
+        else:
+            rank = 0
+    except Exception as _:
+        rank = 0
+    return f"r{rank}/w{worker_id}/p{pid}"
 
 
 class _FrameIndexGenerator:
@@ -76,19 +95,25 @@ class _FrameIndexGenerator:
         self.cumulative_sizes = [0] + list(np.cumsum(self.sizes))
         self.valid_length = sum(self.segment_valid_lengths)
 
-    def generate_frame_indices(self, sample_indices: torch.Tensor) -> list[int]:
+    def generate_frame_indices(
+        self, sample_indices: torch.Tensor
+    ) -> tuple[list[list[int]], list[int]]:
         """Generate frame indices from sample indices with striding and model rank slicing.
 
         Args:
             sample_indices: Tensor of logical sample indices for each sample in the batch
 
         Returns:
-            List of frame indices to load
+            Tuple of:
+                - List of frame indices to load (sliced for this rank)
+                - List of global first frame indices
         """
         frame_idxs = []
+        global_first_frames = []
         for sample_idx in sample_indices:
             # Map logical sample index to physical frame index
             physical_idx = self._map_logical_to_physical(sample_idx)
+            global_first_frames.append(physical_idx)
 
             # Create frame range with striding
             frames = list(
@@ -103,7 +128,7 @@ class _FrameIndexGenerator:
             end = start + self.t_local
             frames = frames[start:end]
             frame_idxs.append(frames)
-        return frame_idxs
+        return frame_idxs, global_first_frames
 
     def _map_logical_to_physical(self, logical_idx: int) -> int:
         """Map logical sample index to physical frame index across segments."""
@@ -380,6 +405,7 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         self.t_local = self._frame_indexer.t_local  # model parallel T split
         self.local_frame_span = (self.t_local - 1) * self.frame_step + 1
         self.overlap = self.local_frame_span - 1  # extra frames beyond first sample
+        self.cache_chunk_size = cache_chunk_size
         self.load_chunk_size = self.cache_chunk_size + self.overlap
 
         # Offset for cache boundaries: this rank's frames start at t_offset * frame_step
@@ -388,6 +414,7 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         self._cache_start = 0
         self._cache_end = 0
         self._cache_data = None
+        self._cache_hits = None
 
     def __len__(self):
         return self._frame_indexer.get_valid_length()
@@ -402,13 +429,28 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
             ]
 
         frames = []
-        # TODO this caching logic only works well if frame_idxs is sequential.
-        # otherwise it will results in many cache misses. --improved for random access but within a chunk
         for i in frame_idxs:
             if not (self._cache_start <= i < self._cache_end):
-                cache_id = (i - self._cache_offset) // self.cache_chunk_size
+                # Cache miss - log detailed debug info
+                prev_cache_id = self._cache_id
+                prev_range = f"[{self._cache_start}:{self._cache_end})"
+                new_cache_id = (i - self._cache_offset) // self.cache_chunk_size
+
+                worker_info = _get_worker_info()
+                hits_str = (
+                    f"after {self._cache_hits} hits"
+                    if self._cache_hits
+                    else "cold start"
+                )
+                print(
+                    f"[Cache {worker_info}] MISS {hits_str} | "
+                    f"frame={i} cache_id={prev_cache_id}->{new_cache_id} "
+                    f"range={prev_range} offset={self._cache_offset} chunk={self.cache_chunk_size}"
+                )
+                self._cache_hits = 0
+
                 self._cache_start = (
-                    cache_id * self.cache_chunk_size + self._cache_offset
+                    new_cache_id * self.cache_chunk_size + self._cache_offset
                 )
                 self._cache_end = min(
                     self._cache_start + self.load_chunk_size, len(self.times)
@@ -416,11 +458,14 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
                 window_times = self.times[self._cache_start : self._cache_end]
                 window_data = sync(self._loader.sel_time(window_times))
                 self._cache_data = [
-                    {k: v[i] for k, v in window_data.items()}
-                    for i in range(len(window_times))
+                    {k: v[idx] for k, v in window_data.items()}
+                    for idx in range(len(window_times))
                 ]
-
-                self._cache_id = cache_id
+                self._cache_id = new_cache_id
+            else:
+                if self._cache_hits is None:
+                    self._cache_hits = 0
+                self._cache_hits += 1
             frames.append(self._cache_data[i - self._cache_start])
         return frames
 
@@ -431,13 +476,15 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         else:
             return result[0]
 
-    def _batch_transform(self, times, frames):
+    def _batch_transform(self, times, frames, global_first_timestamps):
         if self.batch_transform:
-            return self.batch_transform(times, frames)
+            return self.batch_transform(times, frames, global_first_timestamps)
         elif self.transform:
             output = []
-            for sample_times, sample_frames in zip(times, frames):
-                output.append(self.transform(sample_times, sample_frames))
+            for sample_times, sample_frames, first_ts in zip(
+                times, frames, global_first_timestamps
+            ):
+                output.append(self.transform(sample_times, sample_frames, first_ts))
             return output
 
     def _get_times_and_frames(self, idx):
@@ -448,7 +495,9 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
 
         batch_size = len(idx)
 
-        frame_idxs = self._frame_indexer.generate_frame_indices(idx)
+        frame_idxs, global_first_frames = self._frame_indexer.generate_frame_indices(
+            idx
+        )
         flat_frame_idxs = sum(frame_idxs, start=[])
 
         frames = self._load(flat_frame_idxs)
@@ -460,6 +509,14 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
             cftimestamp = cbottle.datetime.as_cftime(timestamp)
             timestamps.append(cftimestamp)
 
+        # Get global first frame timestamps (same across all MP ranks)
+        global_first_timestamps = []
+        for first_frame_idx in global_first_frames:
+            time = self.times[first_frame_idx]
+            timestamp = pd.Timestamp(time)
+            cftimestamp = cbottle.datetime.as_cftime(timestamp)
+            global_first_timestamps.append(cftimestamp)
+
         def reshape(list):
             n = len(list) // batch_size
             return [[list[n * i + j] for j in range(n)] for i in range(batch_size)]
@@ -467,11 +524,11 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         timestamps = reshape(timestamps)
         frames = reshape(frames)
 
-        return timestamps, frames
+        return timestamps, frames, global_first_timestamps
 
     def __getitems__(self, idx):
-        timestamps, frames = self._get_times_and_frames(idx)
-        return self._batch_transform(timestamps, frames)
+        timestamps, frames, global_first_timestamps = self._get_times_and_frames(idx)
+        return self._batch_transform(timestamps, frames, global_first_timestamps)
 
 
 def _split_array_contiguous(x):

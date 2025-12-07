@@ -19,6 +19,7 @@ import json
 import gc
 import os
 import pickle
+import random
 import time
 import warnings
 from functools import partial
@@ -120,6 +121,16 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
     def _finalize_network(self, net):
         return net
 
+    @property
+    def data_world_size(self) -> int:
+        """Number of data parallel replicas."""
+        return dist.get_world_size()
+
+    @property
+    def data_rank(self) -> int:
+        """Rank for data parallelism."""
+        return dist.get_rank()
+
     def _setup_networks(self):
         self.net = self.get_network()
         self.net.train().requires_grad_(True).to(self.device)
@@ -187,17 +198,20 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
 
     @property
     def batch_gpu_total(self) -> int:
-        world_size: int = dist.get_world_size()
-        return self.batch_size // world_size
+        return self.batch_size // self.data_world_size
 
     def setup_batching(self):
         # Select batch size per GPU.
         if self.batch_gpu is None or self.batch_gpu > self.batch_gpu_total:
             self.batch_gpu = self.batch_gpu_total
+
+        if self.batch_gpu_total % self.batch_gpu != 0:
+            raise ValueError()
+
         num_accumulation_rounds = self.batch_gpu_total // self.batch_gpu
         assert (
             self.batch_size
-            == self.batch_gpu * num_accumulation_rounds * dist.get_world_size()
+            == self.batch_gpu * num_accumulation_rounds * self.data_world_size
         )
         self.num_accumulation_rounds = num_accumulation_rounds
 
@@ -324,6 +338,8 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                         training_stats.report("grad_norm", param.grad.norm(2))
 
                 total_loss += loss_mean.detach().cpu() / self.num_accumulation_rounds
+
+        return total_loss.item()
 
     def learning_rate(self, cur_nimg: int) -> float:
         return min(cur_nimg / max(self.lr_rampup_img, 1e-8), 1.0)
@@ -527,18 +543,42 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         self.resume_from_state(training_state, require_all=require_all)
 
     def _set_random_seeds(self):
-        """Set random seeds for reproducibility."""
+        """Set random seeds for reproducibility.
+
+        Uses data_rank/data_world_size so model parallel ranks get identical seeds.
+        """
         np.random.seed(
-            (self.seed * dist.get_world_size() + dist.get_rank() + self.cur_nimg)
+            (self.seed * self.data_world_size + self.data_rank + self.cur_nimg)
             % (1 << 31)
         )
         torch.manual_seed(np.random.randint(1 << 31))
+        random.seed(np.random.randint(1 << 31))
+
+    def _init_step_timing(self):
+        """Initialize timing stats for step-level debugging."""
+        self._step_times = []
+        self._step_count = 0
+
+    def _log_step_timing(self, step_time: float, loss_val: float = None):
+        self._step_times.append(step_time)
+        self._step_count += 1
+        avg_time = sum(self._step_times) / len(self._step_times)
+
+        if dist.get_rank() != 0:
+            return
+
+        loss_str = f"  loss={loss_val:.2f}" if loss_val is not None else ""
+        print(
+            f"[Step {self._step_count:>5}]  "
+            f"time={step_time:.2f}s  avg={avg_time:.2f}s{loss_str}"
+        )
 
     def train(self):
         # Initialize.
         dist.print0("Loss function", self.loss_fn)
         start_time = time.time()
         self._set_random_seeds()
+        self._init_step_timing()
         torch.backends.cudnn.benchmark = self.cudnn_benchmark
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -551,10 +591,13 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         dataset_iterator = iter(self.train_loader)
         for cur_tick in range(self.total_ticks):
             for _ in range(self.steps_per_tick):
-                self.backward_batch(dataset_iterator)
+                step_start = time.time()
+                loss_val = self.backward_batch(dataset_iterator)
                 self.cur_nimg += self.batch_size
                 self.step_optimizer(self.cur_nimg)
                 self.update_ema(self.cur_nimg)
+                step_time = time.time() - step_start
+                self._log_step_timing(step_time, loss_val)
 
             tick_end_time = time.time()
             self.log_tick(

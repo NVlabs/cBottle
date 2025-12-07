@@ -237,6 +237,7 @@ def _collect_fields(
 def _transform(
     times: list[cftime.DatetimeGregorian],
     data_list: list[dict],
+    global_first_timestamp=None,
     *,
     encode_frame,
     frame_masker,
@@ -260,7 +261,11 @@ def _transform(
     # Current network uses a single label regardless of time length
     # and all frames are assumed to have the same dataset label
     out["labels"] = frames[0]["labels"]
-    out["timestamp"] = frames[0]["timestamp"]
+    # Use global_first_timestamp (for MP) if provided, else local first frame
+    if global_first_timestamp is not None:
+        out["timestamp"] = _cftime_to_timestamp(global_first_timestamp)
+    else:
+        out["timestamp"] = frames[0]["timestamp"]
 
     return frame_masker(out)
 

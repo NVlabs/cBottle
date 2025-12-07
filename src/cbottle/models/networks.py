@@ -1395,8 +1395,7 @@ class SongUNet(torch.nn.Module):
     def set_parallel_group(self, group, t_full=None):
         """Set the model parallel group for temporal attention sharding.
 
-        Propagates the parallel group to all encoder and decoder blocks
-        that have temporal attention.
+        Propagates the parallel group to all UNetBlocks in encoder and decoder.
 
         Args:
             group: The process group for model parallelism
@@ -1405,11 +1404,13 @@ class SongUNet(torch.nn.Module):
         if t_full is None:
             t_full = self.time_length
 
-        for name, block in self.enc.items():
-            block.set_parallel_group(group, t_full)
+        for block in self.enc.values():
+            if isinstance(block, UNetBlock):
+                block.set_parallel_group(group, t_full)
 
-        for name, block in self.dec.items():
-            block.set_parallel_group(group, t_full)
+        for block in self.dec.values():
+            if isinstance(block, UNetBlock):
+                block.set_parallel_group(group, t_full)
 
     def forward(
         self,

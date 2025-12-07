@@ -40,8 +40,12 @@ import torch.utils
 import torch.utils.data
 from cbottle import distributed as dist
 from cbottle import training_stats
-from cbottle.models.distributed import compute_t_split
-from cbottle.models.distributed import DistributedConfig
+from cbottle.models.distributed import (
+    compute_t_split,
+    DistributedConfig,
+    unwrap_net,
+    make_mp_randn_like,
+)
 from cbottle.dataclass_parser import parse_args
 from cbottle.datasets import dataset_2d
 from cbottle.datasets.base import BatchInfo, TimeUnit
@@ -100,6 +104,7 @@ class TrainingLoop(loop.TrainingLoopBase):
 
     # data options
     with_era5: bool = True
+    with_icon: bool = True
     use_labels: bool = False
     dataloader_num_workers: int = 1
     dataloader_prefetch_factor: int = 200
@@ -242,13 +247,20 @@ class TrainingLoop(loop.TrainingLoopBase):
         t_end = t_start + t_splits[cfg.model_rank]
         return (t_start, t_end, self.time_length)
 
+    @functools.cached_property
+    def mp_randn_like(self):
+        """Randn_like function that handles MP sharding."""
+        return make_mp_randn_like(self.t_bounds)
+
     @property
-    def batch_gpu_total(self) -> int:
-        """Total batch size per GPU accounting for model parallelism."""
-        if self.model_parallel > 1:
-            return self.batch_size // self._device_mesh.shape[0]
-        else:
-            return super().batch_gpu_total
+    def data_world_size(self) -> int:
+        """Number of data parallel replicas."""
+        return self.distributed_config.data_world_size
+
+    @property
+    def data_rank(self) -> int:
+        """Rank for data parallelism."""
+        return self.distributed_config.data_rank
 
     def setup(self):
         # Set up model parallel device mesh before calling super().setup()
@@ -334,22 +346,26 @@ class TrainingLoop(loop.TrainingLoopBase):
 
     def get_dataset(self, train: bool):
         """Returns the final wrapped dataset for both image and video training."""
-        if self.with_era5 and dist.get_world_size() % 2 != 0:
-            warnings.warn(
-                RuntimeWarning(
-                    "world size not divisible by 2. ERA5 and ICON will not be 50-50."
-                )
-            )
+        cfg = self.distributed_config
 
-        if self.with_era5:
-            n_era5 = math.ceil(dist.get_world_size() / 2)
+        if not self.with_era5 and not self.with_icon:
+            raise ValueError("At least one of with_era5 or with_icon must be True")
+
+        if self.with_era5 and self.with_icon:
+            if cfg.data_world_size % 2 != 0:
+                warnings.warn(
+                    RuntimeWarning(
+                        "data world size not divisible by 2. ERA5 and ICON will not be 50-50."
+                    )
+                )
+            n_era5 = math.ceil(cfg.data_world_size / 2)
+        elif self.with_era5:
+            n_era5 = cfg.data_world_size
         else:
             n_era5 = 0
 
-        cfg = self.distributed_config
-
         # Determine which dataset to use based on data rank
-        if self.with_era5 and cfg.data_rank < n_era5:
+        if cfg.data_rank < n_era5:
             dataset = "era5"
             effective_rank = cfg.data_rank
             effective_world_size = n_era5
@@ -460,7 +476,13 @@ class TrainingLoop(loop.TrainingLoopBase):
             return RoundRobinLoader(dataloaders)
 
         sampler = samplers.distributed_split(
-            samplers.subsample(dataset, min_samples=self.valid_min_samples)
+            samplers.subsample(
+                dataset,
+                min_samples=self.valid_min_samples,
+                world_size=cfg.data_world_size,
+            ),
+            rank=cfg.data_rank,
+            world_size=cfg.data_world_size,
         )
 
         return self._create_dataloader(
@@ -508,25 +530,11 @@ class TrainingLoop(loop.TrainingLoopBase):
 
         return D
 
-    def _set_random_seeds(self):
-        """Override to use data_rank for model parallelism.
-
-        All model parallel ranks processing the same sample get identical
-        random states for sigma sampling, frame masking, etc.
-        """
-        cfg = self.distributed_config
-        np.random.seed(
-            (self.seed * cfg.data_world_size + cfg.data_rank + self.cur_nimg)
-            % (1 << 31)
-        )
-        torch.manual_seed(np.random.randint(1 << 31))
-        random.seed(np.random.randint(1 << 31))
-
     def _check_mp_timestamps(self, timestamp):
-        """Verify timestamps are sequential across model parallel ranks.
+        """Verify timestamps are identical across model parallel ranks.
 
-        Each rank has a shard of T; when gathered, they should form a
-        contiguous sequence with time_step intervals.
+        All MP ranks process the same sample (different time slices), so they
+        should all have the same starting timestamp.
         """
         if not self.check_mp_batch or self.model_parallel <= 1:
             return
@@ -540,20 +548,16 @@ class TrainingLoop(loop.TrainingLoopBase):
             gather_list, timestamp.contiguous(), group=model_group
         )
 
-        # Concatenate along time dimension: (B, T_local) -> (B, T_full)
-        all_timestamps = torch.cat(gather_list, dim=1)
-
-        # Check that timestamps are sequential with time_step intervals
-        expected_diff = self.time_step * 3600  # time_step is in hours
-        diffs = torch.diff(all_timestamps, dim=1)
-
-        if not torch.all(diffs == expected_diff):
-            times = all_timestamps.cpu().numpy().astype("datetime64[s]")
-            raise ValueError(
-                f"Timestamps not sequential across MP ranks: {times}\n"
-                f"Expected diff: {expected_diff}s, got: {diffs.cpu().numpy()}\n"
-                "This indicates model parallelism is not set up correctly."
-            )
+        # All ranks should have identical timestamps (same sample)
+        reference = gather_list[0]
+        for i, ts in enumerate(gather_list[1:], 1):
+            if not torch.equal(reference, ts):
+                raise ValueError(
+                    f"Timestamp mismatch across MP ranks!\n"
+                    f"Rank 0: {reference.cpu()}\n"
+                    f"Rank {i}: {ts.cpu()}\n"
+                    "MP ranks are not processing the same sample."
+                )
 
     def _check_mp_sigma(self, sigma):
         """Verify sigma is identical across model parallel ranks.
@@ -585,7 +589,9 @@ class TrainingLoop(loop.TrainingLoopBase):
     def _check_mp_rng_sync(self):
         """Verify RNG state is identical across model parallel ranks.
 
-        Generate test random numbers and compare across ranks.
+        Generates one value from each RNG and compares across ranks.
+        If in sync, values match; if not, they differ. Uses minimal
+        RNG consumption to avoid affecting subsequent operations.
         """
         if not self.check_mp_batch or self.model_parallel <= 1:
             return
@@ -594,30 +600,34 @@ class TrainingLoop(loop.TrainingLoopBase):
         model_group = self._device_mesh.get_group(1)
         device = torch.device("cuda")
 
-        # Generate test random numbers from each RNG
-        test_torch = torch.randn(4, device=device)
-        test_np = torch.tensor(np.random.rand(4), device=device, dtype=torch.float32)
-        test_random = torch.tensor([random.random() for _ in range(4)], device=device)
+        # Generate one test value from each RNG (minimal consumption)
+        test_vals = torch.tensor(
+            [
+                torch.randn(1, device=device).item(),
+                np.random.rand(),
+                random.random(),
+            ],
+            device=device,
+            dtype=torch.float32,
+        )
 
-        for name, test_val in [
-            ("torch", test_torch),
-            ("numpy", test_np),
-            ("random", test_random),
-        ]:
-            gather_list = [torch.empty_like(test_val) for _ in range(model_world_size)]
-            torch.distributed.all_gather(
-                gather_list, test_val.contiguous(), group=model_group
-            )
+        gather_list = [torch.empty_like(test_vals) for _ in range(model_world_size)]
+        torch.distributed.all_gather(
+            gather_list, test_vals.contiguous(), group=model_group
+        )
 
-            reference = gather_list[0]
-            for i, val in enumerate(gather_list[1:], 1):
-                if not torch.allclose(reference, val, rtol=1e-5, atol=1e-5):
-                    raise ValueError(
-                        f"{name} RNG mismatch across MP ranks!\n"
-                        f"Rank 0: {reference.cpu()}\n"
-                        f"Rank {i}: {val.cpu()}\n"
-                        "RNG is not synchronized across MP ranks."
-                    )
+        reference = gather_list[0]
+        for i, val in enumerate(gather_list[1:], 1):
+            if not torch.allclose(reference, val, rtol=1e-5, atol=1e-5):
+                rng_names = ["torch", "numpy", "random"]
+                for j, name in enumerate(rng_names):
+                    if abs(reference[j] - val[j]) > 1e-5:
+                        raise ValueError(
+                            f"{name} RNG mismatch across MP ranks!\n"
+                            f"Rank 0: {reference[j].item():.6f}\n"
+                            f"Rank {i}: {val[j].item():.6f}\n"
+                            "RNG is not synchronized across MP ranks."
+                        )
 
     def train_step(self, *, target, timestamp=None, **batch):
         # Sanity checks for model parallel setup
@@ -629,7 +639,7 @@ class TrainingLoop(loop.TrainingLoopBase):
             self._curry_net(self.ddp, batch),
             target,
             classifier_labels=batch.get("classifier_labels"),
-            t_bounds=self.t_bounds,
+            randn_like=self.mp_randn_like,
         )
 
         # Check sigma is identical across MP ranks (RNG sync check)
@@ -643,11 +653,12 @@ class TrainingLoop(loop.TrainingLoopBase):
         return loss.total
 
     def test_step(self, *, target, timestamp=None, **batch):
+        self._check_mp_rng_sync()
         loss: cbottle.loss.Output = self.loss_fn(
             self._curry_net(self.ddp, batch),
             target,
             classifier_labels=batch.get("classifier_labels"),
-            t_bounds=self.t_bounds,
+            randn_like=self.mp_randn_like,
         )
         training_stats.report("Loss/test_denoising", loss.denoising)
         self._test_sigma_metric.update(loss.sigma, loss.denoising)
@@ -754,6 +765,7 @@ class TrainingLoop(loop.TrainingLoopBase):
                 sigma_min=self.sigma_min,
                 sigma_max=self.sigma_max,
                 divergence_samples=1,
+                randn_like=self.mp_randn_like,
             )
 
         # Log data by label
@@ -775,9 +787,13 @@ class TrainingLoop(loop.TrainingLoopBase):
 
     def validate(self, net=None):
         # show plots for a single batch
+        val_start = time.time()
+        dist.print0("[Validate] Starting validation...")
+
         if net is None:
             net = self.net
         net.eval()
+        base_net = unwrap_net(net)  # unwrap for net attribute access
         seasons = {
             "DJF": (12, 1, 2),
             "MAM": (3, 4, 5),
@@ -792,7 +808,7 @@ class TrainingLoop(loop.TrainingLoopBase):
         totals = {}
 
         def update(key, array):
-            n, total = totals.get(key, (torch.tensor(0, device=net.device), 0))
+            n, total = totals.get(key, (torch.tensor(0, device=base_net.device), 0))
             totals[key] = (n + 1, total + array)
 
         def finish():
@@ -809,8 +825,8 @@ class TrainingLoop(loop.TrainingLoopBase):
 
                 # reduce the total onto rank=0
                 for key in keys:
-                    buf = torch.zeros([net.domain.numel()], device=net.device)
-                    n = torch.tensor(0, device=net.device)
+                    buf = torch.zeros([base_net.domain.numel()], device=base_net.device)
+                    n = torch.tensor(0, device=base_net.device)
                     if key in totals:
                         n, total = totals[key]
                         buf.copy_(total)
@@ -835,11 +851,14 @@ class TrainingLoop(loop.TrainingLoopBase):
             global_times_to_visualize = list(range(min(self.time_length, 4)))
 
         d = None
+        total_batches = (
+            self.valid_min_samples + self.batch_size - 1
+        ) // self.batch_size
+        dist.print0(f"[Validate] Processing up to {total_batches} batches...")
+
         for batch_num, batch in enumerate(self.valid_loader):
-            if (
-                batch_num * dist.get_world_size() * self.batch_gpu
-                >= self.valid_min_samples
-            ):
+            iter_start = time.time()
+            if batch_num * self.batch_size >= self.valid_min_samples:
                 break
             batch = self._stage_dict_batch(batch)
             images = batch["target"]
@@ -850,7 +869,7 @@ class TrainingLoop(loop.TrainingLoopBase):
                 for t in timestamp
             ]
 
-            hpx = net.domain._grid
+            hpx = base_net.domain._grid
             ring_images = hpx.reorder(earth2grid.healpix.PixelOrder.RING, images)
 
             # Use t_bounds for time offset calculations
@@ -859,6 +878,7 @@ class TrainingLoop(loop.TrainingLoopBase):
             time_length_to_log = min(t_local, 4)
             cfg = self.distributed_config
 
+            sample_start = time.time()
             with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
                 d = sample_from_condition(
                     net,
@@ -867,8 +887,9 @@ class TrainingLoop(loop.TrainingLoopBase):
                     regression=self.regression,
                     sigma_max=self.sigma_max,
                     sigma_min=self.sigma_min,
-                    t_bounds=(t_start, t_end),
+                    randn_like=self.mp_randn_like,
                 )
+            sample_time = time.time() - sample_start
 
             for j in range(len(times)):
                 first_frame_time = times[j]
@@ -893,15 +914,34 @@ class TrainingLoop(loop.TrainingLoopBase):
                             f"seasonal_cycle/{field}/{season}/truth",
                             ring_images[j, c, t] * b.scales[c] + b.center[c],
                         )
+            test_start = time.time()
             with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
                 with torch.no_grad():
                     # Classifier validation
                     self.validate_classifier(images, net, batch)
                     loss = self.test_step(**batch)
                     training_stats.report("Loss/test_loss", loss)
+            test_time = time.time() - test_start
 
-                self._report_log_likelihood(net, batch)
+            # Log likelihood is expensive for video - only compute on first batch
+            if batch_num == 0 or self.time_length == 1:
+                ll_start = time.time()
+                with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
+                    self._report_log_likelihood(net, batch)
+                ll_time = time.time() - ll_start
+            else:
+                ll_time = 0.0
 
+            iter_time = time.time() - iter_start
+            ll_str = f"ll={ll_time:.2f}s, " if ll_time > 0 else ""
+            dist.print0(
+                f"[Validate] Batch {batch_num+1}/{total_batches}: "
+                f"sample={sample_time:.2f}s, test={test_time:.2f}s, {ll_str}total={iter_time:.2f}s"
+            )
+
+        dist.print0(f"[Validate] Batch loop done in {time.time() - val_start:.2f}s")
+
+        finish_start = time.time()
         averages = finish()
         self.finish_sigma_by_loss_metrics()
 
@@ -921,7 +961,12 @@ class TrainingLoop(loop.TrainingLoopBase):
                 else:
                     averages[f"JJA-DJF/{field}/{source}"] = jja - djf
 
+        dist.print0(
+            f"[Validate] Finish/reduce done in {time.time() - finish_start:.2f}s"
+        )
+
         # Gather frames for visualization to rank 0
+        gather_start = time.time()
         if cfg.model_world_size > 1:
             model_group = self._device_mesh.get_group(1)
 
@@ -950,7 +995,10 @@ class TrainingLoop(loop.TrainingLoopBase):
             full_ring_images = ring_images
             full_d = d
 
+        dist.print0(f"[Validate] Gather done in {time.time() - gather_start:.2f}s")
+
         # Visualize on rank 0
+        viz_start = time.time()
         if dist.get_rank() == 0:
             for global_t in global_times_to_visualize:
                 for field in full_d:
@@ -977,6 +1025,9 @@ class TrainingLoop(loop.TrainingLoopBase):
             for key in averages:
                 visualize(averages[key])
                 self.writer.add_figure(key, plt.gcf(), global_step=self.cur_nimg)
+
+        dist.print0(f"[Validate] Visualization done in {time.time() - viz_start:.2f}s")
+        dist.print0(f"[Validate] Complete! Total time: {time.time() - val_start:.2f}s")
 
     def validate_classifier(self, images, net, batch):
         if self.ibtracs_input:
@@ -1049,21 +1100,22 @@ def main():
         name = cli.name
 
     loop.run_dir = os.path.join(cli.output_dir, name)
-
     dist.init()
+    data_world_size = dist.get_world_size() // loop.model_parallel
+
     if cli.test_fast:
         loop.total_ticks = 2
         loop.steps_per_tick = 1
         loop.state_dump_ticks = 1
         loop.snapshot_ticks = 1
-        loop.batch_size = 1 * dist.get_world_size()
+        loop.batch_size = 1 * data_world_size
         loop.batch_gpu = 1
         loop.lr_rampup_img = 10_000
-        loop.valid_min_samples = 2 * dist.get_world_size()
+        loop.valid_min_samples = 2 * data_world_size
 
     if cli.regression:
         loop.lr = 0.0001
-        loop.batch_size = loop.batch_gpu * dist.get_world_size()
+        loop.batch_size = loop.batch_gpu * data_world_size
         loop.steps_per_tick = 1000
 
     print("Training with:", loop)

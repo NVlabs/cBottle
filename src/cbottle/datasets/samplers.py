@@ -21,8 +21,10 @@ import torch.utils.data
 import cbottle.distributed as dist
 
 
-def subsample(dataset, min_samples):
-    samples = min_samples % dist.get_world_size() + min_samples
+def subsample(dataset, min_samples, world_size: int = None):
+    if world_size is None:
+        world_size = dist.get_world_size()
+    samples = min_samples % world_size + min_samples
     golden_ratio = 1.618033988749
     n = len(dataset)
     sampler = [int((i * n * golden_ratio) % n) for i in range(samples)]
@@ -30,10 +32,12 @@ def subsample(dataset, min_samples):
     return sampler
 
 
-def distributed_split(tasks, drop_last=True):
+def distributed_split(tasks, drop_last=True, rank: int = None, world_size: int = None):
     n = len(tasks)
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
+    if rank is None:
+        rank = dist.get_rank()
+    if world_size is None:
+        world_size = dist.get_world_size()
     chunk = math.ceil(len(tasks) / world_size)
     start = rank * chunk
     stop = n if drop_last and (rank == world_size - 1) else start + chunk

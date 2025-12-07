@@ -25,6 +25,7 @@ def log_prob(
     sigma_max: float = 80.0,
     divergence_samples: int = 32,
     rtol=0.05,
+    randn_like=torch.randn_like,
 ):
     """Compute likelihood following Appendix D.2 of Song, et. al. (2020).
 
@@ -73,7 +74,7 @@ def log_prob(
         divf = 0
         for i in range(divergence_samples):
             x.grad = None
-            e = torch.randn_like(image)
+            e = randn_like(image)
             gf = torch.sum(dx.clone() * e)
             gf.backward(retain_graph=True)
             dims = list(range(1, image.ndim))

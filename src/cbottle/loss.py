@@ -107,7 +107,7 @@ class EDMLoss:
         net: Callable[..., cbottle.models.networks.Output],
         images,
         classifier_labels=None,
-        t_bounds: tuple[int, int, int] = None,  # (start, end, full)
+        randn_like=torch.randn_like,
     ) -> Output:
         if self.distribution == "log_normal":
             sigma = self._sample_sigma_like_v1(images)
@@ -123,14 +123,7 @@ class EDMLoss:
         weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
         y = images
 
-        # Generate full noise and slice to keep RNG aligned across MP ranks
-        t_start, t_end, t_full = (
-            t_bounds if t_bounds is not None else (0, y.shape[2], y.shape[2])
-        )
-        full_noise = torch.randn(
-            y.shape[0], y.shape[1], t_full, y.shape[3], device=y.device, dtype=y.dtype
-        )
-        n = full_noise[:, :, t_start:t_end, :] * sigma
+        n = randn_like(y) * sigma
 
         out = net(torch.where(mask, y + n, 0), sigma)
         denoising_loss = weight * ((out.out - torch.where(mask, y, 0)) ** 2)

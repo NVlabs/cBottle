@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from cbottle.datasets.base import SpatioTemporalDataset, BatchInfo
+from cbottle.models.distributed import unwrap_net
 from earth2grid import healpix
 import cbottle.diffusion_samplers as diffusion_samplers
 import torch
@@ -98,17 +99,17 @@ def sample_regression(net, batch, batch_info: BatchInfo):
     """
     images, labels, condition = batch
     with torch.no_grad():
+        base_net = unwrap_net(net)
         labels = labels.cuda()
         condition = condition.cuda()
         images = images.cuda()
-        hpx = net.domain._grid
+        hpx = base_net.domain._grid
 
         sigma = cbottle.loss.RegressLoss.SIGMA * torch.ones(
             [images.shape[0], 1, 1, 1], device=images.device
         )
         out = net(torch.zeros_like(images), sigma, labels, condition=condition)
         gen = batch_info.denormalize(out)
-        hpx = net.domain._grid
 
         def prepare(x):
             ring_order = hpx.reorder(healpix.PixelOrder.RING, x)
@@ -118,11 +119,17 @@ def sample_regression(net, batch, batch_info: BatchInfo):
 
 
 def call_regression(net, class_labels, condition):
+    base_net = unwrap_net(net)
     sigma = cbottle.loss.RegressLoss.SIGMA * torch.ones(
         [condition.shape[0], 1, 1, 1], device=condition.device
     )
     latent = torch.zeros(
-        [condition.shape[0], net.img_channels, net.time_length, net.domain.numel()],
+        [
+            condition.shape[0],
+            base_net.img_channels,
+            base_net.time_length,
+            base_net.domain.numel(),
+        ],
         device=condition.device,
     )
     out = net(latent, sigma, class_labels, condition=condition)
@@ -130,13 +137,15 @@ def call_regression(net, class_labels, condition):
 
 
 def curry_denoiser(net, *args, **kwargs):
+    base_net = unwrap_net(net)
+
     def D(x, t):
         out = net(x, t, *args, **kwargs)  # Ignore classifier output
         return out.out
 
-    D.sigma_min = net.sigma_min
-    D.sigma_max = net.sigma_max
-    D.round_sigma = net.round_sigma
+    D.sigma_min = base_net.sigma_min
+    D.sigma_max = base_net.sigma_max
+    D.round_sigma = base_net.round_sigma
     return D
 
 
@@ -149,16 +158,16 @@ def sample_from_condition(
     sigma_max: float,
     sigma_min: float,
     seeds=None,
-    t_bounds: tuple[
-        int, int
-    ] = None,  # (start, end) for MP, uses net.time_length for full
+    randn_like=torch.randn_like,
 ):
     """
     example of output format
     {"generated": {"t850": [n, npix]}}}
     """
     with torch.no_grad():
-        hpx = net.domain._grid
+        # Unwrap DDP for attribute access
+        base_net = unwrap_net(net)
+        hpx = base_net.domain._grid
 
         batch = batch.copy()
 
@@ -185,25 +194,23 @@ def sample_from_condition(
                 rnd = StackedRandomGenerator(device, seeds=seeds)
 
             # Generate full latents and slice to keep all mp ranks with same rng state
-            t_full = net.time_length
-            t_start, t_end = t_bounds if t_bounds is not None else (0, t_full)
+            t_full = base_net.time_length
+            t_bounds = getattr(randn_like, "t_bounds", None)
+            if t_bounds is not None:
+                t_start, t_end, _ = t_bounds
+            else:
+                t_start, t_end = 0, t_full
 
             full_latents = rnd.randn(
-                (labels.shape[0], net.img_channels, t_full, net.domain.numel()),
+                (
+                    labels.shape[0],
+                    base_net.img_channels,
+                    t_full,
+                    base_net.domain.numel(),
+                ),
                 device=device,
             )
             latents = full_latents[:, :, t_start:t_end, :]
-
-            def randn_like(x):
-                full_noise = torch.randn(
-                    x.shape[0],
-                    x.shape[1],
-                    t_full,
-                    x.shape[3],
-                    device=x.device,
-                    dtype=x.dtype,
-                )
-                return full_noise[:, :, t_start:t_end, :]
 
             out = diffusion_samplers.edm_sampler(
                 curry_denoiser(net, class_labels=labels, condition=condition, **batch),
@@ -229,10 +236,11 @@ def sample_images(net, batch, batch_info: BatchInfo, seeds=None):
     """
     images, labels, condition = batch
     with torch.no_grad():
+        base_net = unwrap_net(net)
         labels = labels.cuda()
         condition = condition.cuda()
         images = images.cuda()
-        hpx = net.domain._grid
+        hpx = base_net.domain._grid
 
         from cbottle.diffusion_samplers import StackedRandomGenerator
 
@@ -244,7 +252,12 @@ def sample_images(net, batch, batch_info: BatchInfo, seeds=None):
             rnd = StackedRandomGenerator(device, seeds=seeds)
 
         latents = rnd.randn(
-            (images.shape[0], net.img_channels, net.time_length, net.domain.numel()),
+            (
+                images.shape[0],
+                base_net.img_channels,
+                base_net.time_length,
+                base_net.domain.numel(),
+            ),
             device=device,
         )
 
@@ -259,13 +272,13 @@ def sample_images(net, batch, batch_info: BatchInfo, seeds=None):
 
         sigma = torch.tensor(10.0, device=device)
 
-        D = net(images + sigma * latents, net.round_sigma(sigma), labels, condition)
+        D = net(
+            images + sigma * latents, base_net.round_sigma(sigma), labels, condition
+        )
 
         gen = batch_info.denormalize(out)
         truth = batch_info.denormalize(images)
         denoised = batch_info.denormalize(D)
-
-        hpx = net.domain._grid
 
         def prepare(x):
             ring_order = hpx.reorder(healpix.PixelOrder.RING, x)
