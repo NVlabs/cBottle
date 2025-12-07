@@ -649,6 +649,8 @@ def get_dataset(
     dataset: str = "era5",
     rank: int = 0,
     world_size: int = 1,
+    model_rank: int = 0,
+    model_world_size: int = 1,
     sst_input: bool = True,
     infinite: bool = False,
     ibtracs_input: bool = False,
@@ -674,15 +676,11 @@ def get_dataset(
     # Compute frame step
     frame_step = _compute_frame_step(DATASET_METADATA[dataset], time_step, time_length)
 
-    # Handle special cases for AMIP dataset
-    if dataset == "amip":
-        # if shuffle:
-        #     raise NotImplementedError("Shuffling not implemented for AMIP dataset.")
-        # shuffle = False
-        # map_style = time_length > 1
-        pass
-    else:
-        map_style = map_style or (time_length > 1 and split != "train")
+    map_style = map_style or (time_length > 1 and split != "train")
+
+    # Force map_style for model parallelism (TimeMergedMapStyle supports model_rank/model_world_size)
+    if model_world_size > 1:
+        map_style = True
 
     transform = functools.partial(
         _transform,
@@ -696,13 +694,16 @@ def get_dataset(
 
     # Create and return the dataset
     if map_style:
-        # Used for video validation/inference
+        # Used for video validation/inference and model parallelism
         ds = TimeMergedMapStyle(
             times,
             time_loaders=loaders,
             frame_step=frame_step,
             time_length=time_length,
             transform=transform,
+            cache_chunk_size=chunk_size,
+            model_rank=model_rank,
+            model_world_size=model_world_size,
         )
     else:
         ds = TimeMergedDataset(

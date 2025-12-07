@@ -526,15 +526,19 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
 
         self.resume_from_state(training_state, require_all=require_all)
 
-    def train(self):
-        # Initialize.
-        dist.print0("Loss function", self.loss_fn)
-        start_time = time.time()
+    def _set_random_seeds(self):
+        """Set random seeds for reproducibility."""
         np.random.seed(
             (self.seed * dist.get_world_size() + dist.get_rank() + self.cur_nimg)
             % (1 << 31)
         )
         torch.manual_seed(np.random.randint(1 << 31))
+
+    def train(self):
+        # Initialize.
+        dist.print0("Loss function", self.loss_fn)
+        start_time = time.time()
+        self._set_random_seeds()
         torch.backends.cudnn.benchmark = self.cudnn_benchmark
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True

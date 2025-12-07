@@ -24,6 +24,8 @@ import time
 import json
 import warnings
 import functools
+import random
+import numpy as np
 from typing import Any
 
 import cbottle.config.environment as config
@@ -38,6 +40,8 @@ import torch.utils
 import torch.utils.data
 from cbottle import distributed as dist
 from cbottle import training_stats
+from cbottle.models.distributed import compute_t_split
+from cbottle.models.distributed import DistributedConfig
 from cbottle.dataclass_parser import parse_args
 from cbottle.datasets import dataset_2d
 from cbottle.datasets.base import BatchInfo, TimeUnit
@@ -45,6 +49,8 @@ from cbottle.config.training.masking import MaskingConfig, base_masking_config
 from cbottle.metrics import BinnedAverage
 from cbottle.training.video.frame_masker import FrameMasker
 from cbottle.datasets import samplers
+from cbottle.datasets.samplers import ChunkedDistributedSampler
+from cbottle.datasets.round_robin import RoundRobinLoader
 from cbottle.datasets.dataset_3d import (
     VARIABLE_CONFIGS,
     VariableConfig,
@@ -121,6 +127,14 @@ class TrainingLoop(loop.TrainingLoopBase):
 
     channels_last: bool = False  # Use channels_last memory format for training.
 
+    # parallelism settings
+    model_parallel: int = 1  # Number of ranks per model parallel group
+    check_mp_batch: bool = False  # Enable sanity checks for model parallel batches
+
+    def __post_init__(self):
+        super().__post_init__()
+        self._device_mesh = None
+
     @property
     def variable_config(self) -> VariableConfig:
         return VARIABLE_CONFIGS[self.variables]
@@ -189,9 +203,63 @@ class TrainingLoop(loop.TrainingLoopBase):
             self._sigma_metric_bin_edges
         ).to(self.device)
 
+    @property
+    def distributed_config(self) -> DistributedConfig:
+        """Get the distributed configuration for data and model parallelism."""
+        if self._device_mesh is not None:
+            data_rank = self._device_mesh.get_local_rank(0)
+            model_rank = self._device_mesh.get_local_rank(1)
+            data_world_size, model_world_size = self._device_mesh.mesh.shape
+        else:
+            data_rank = dist.get_rank()
+            data_world_size = dist.get_world_size()
+            model_rank = 0
+            model_world_size = 1
+        return DistributedConfig(
+            data_rank, data_world_size, model_rank, model_world_size
+        )
+
+    @property
+    def model_rank(self):
+        """Get the model parallel rank within the model group."""
+        return self.distributed_config.model_rank
+
+    @property
+    def model_size(self):
+        """Get the model parallel world size."""
+        return self.distributed_config.model_world_size
+
+    @property
+    def batch_gpu_total(self) -> int:
+        """Total batch size per GPU accounting for model parallelism."""
+        if self.model_parallel > 1:
+            return self.batch_size // self._device_mesh.shape[0]
+        else:
+            return super().batch_gpu_total
+
     def setup(self):
+        # Set up model parallel device mesh before calling super().setup()
+        self._device_mesh = None
+        if self.model_parallel > 1:
+            self._device_mesh = torch.distributed.init_device_mesh(
+                "cuda",
+                [dist.get_world_size() // self.model_parallel, self.model_parallel],
+                mesh_dim_names=["data", "model"],
+            )
+            dist.print0("Setting up model parallelism")
+            dist.print0(f"{self.batch_gpu_total=}")
+            rank = self._device_mesh.get_rank()
+            data_rank = self._device_mesh.get_local_rank(0)
+            model_rank = self._device_mesh.get_local_rank(1)
+            print(f"{rank=} {data_rank=} {model_rank=}")
+
         super().setup()
         self.setup_sigma_bins()
+
+        # Set parallel group on the network for model parallelism
+        if self.model_parallel > 1:
+            model_group = self._device_mesh.get_group(1)
+            self.net.set_parallel_group(model_group, t_full=self.time_length)
 
     def finish_sigma_by_loss_metrics(self):
         values = {}
@@ -234,11 +302,22 @@ class TrainingLoop(loop.TrainingLoopBase):
         if self.time_length == 1:
             return None
         else:
+            cfg = self.distributed_config
             if train:
-                return FrameMasker(masking_config=self.masking_config)
+                return FrameMasker(
+                    masking_config=self.masking_config,
+                    model_rank=cfg.model_rank,
+                    model_world_size=cfg.model_world_size,
+                    t_full=self.time_length,
+                )
             else:
                 # use a fixed unconditional generation task for test set
-                return FrameMasker(keep_frames=[])
+                return FrameMasker(
+                    keep_frames=[],
+                    model_rank=cfg.model_rank,
+                    model_world_size=cfg.model_world_size,
+                    t_full=self.time_length,
+                )
 
     def get_dataset(self, train: bool):
         """Returns the final wrapped dataset for both image and video training."""
@@ -254,76 +333,137 @@ class TrainingLoop(loop.TrainingLoopBase):
         else:
             n_era5 = 0
 
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
+        cfg = self.distributed_config
 
-        # Determine which dataset to use based on rank
-        if self.with_era5 and rank < n_era5:
+        # Determine which dataset to use based on data rank
+        if self.with_era5 and cfg.data_rank < n_era5:
             dataset = "era5"
-            effective_rank = rank
+            effective_rank = cfg.data_rank
             effective_world_size = n_era5
             chunk_size = self.era5_chunk_size
         else:
             dataset = "icon"
-            effective_rank = rank - n_era5
-            effective_world_size = world_size - n_era5
+            effective_rank = cfg.data_rank - n_era5
+            effective_world_size = cfg.data_world_size - n_era5
             chunk_size = self.icon_chunk_size
 
+        map_style_no_chunking = self.model_parallel > 1 and not train
         return get_dataset(
             split="train" if train else "test",
             dataset=dataset,
             rank=effective_rank,
             world_size=effective_world_size,
+            model_rank=cfg.model_rank,
+            model_world_size=cfg.model_world_size,
             sst_input=self.monthly_sst_input,
             infinite=True,
             shuffle=True,
-            chunk_size=chunk_size,
+            chunk_size=chunk_size if not map_style_no_chunking else 0,
             time_step=self.time_step,
             time_length=self.time_length,
             frame_masker=self._get_frame_masker(train),
             ibtracs_input=self.ibtracs_input,
             variable_config=VARIABLE_CONFIGS[self.variables],
+            map_style=self.model_parallel > 1,
         )
 
     # unused settings only for backwards compatibility
     valid_samples_per_season: Any = None
 
-    def get_data_loaders(self, batch_gpu):
-        dataset = self.get_dataset(train=True)
-        batch_size = batch_gpu
-
-        train_loader = torch.utils.data.DataLoader(
+    def _create_dataloader(
+        self,
+        dataset,
+        batch_size: int,
+        *,
+        sampler=None,
+        num_workers: int = None,
+        prefetch_factor: int = None,
+    ):
+        return torch.utils.data.DataLoader(
             dataset,
             batch_size=batch_size,
-            pin_memory=True,
-            num_workers=self.dataloader_num_workers,
-            prefetch_factor=self.dataloader_prefetch_factor,
-            multiprocessing_context=(
-                "spawn" if self.dataloader_num_workers > 0 else None
-            ),
-            persistent_workers=self.dataloader_num_workers > 0,
-        )
-
-        test_dataset = self.get_dataset(train=False)
-        num_test_batches_per_rank = self.valid_min_samples // (
-            dist.get_world_size() * batch_gpu
-        )
-        num_workers = min(num_test_batches_per_rank, self.dataloader_num_workers)
-        test_sampler = None
-        if not isinstance(test_dataset, torch.utils.data.IterableDataset):
-            test_sampler = samplers.distributed_split(
-                samplers.subsample(test_dataset, min_samples=self.valid_min_samples)
-            )
-
-        test_loader = torch.utils.data.DataLoader(
-            test_dataset,
-            batch_size=batch_gpu,
+            sampler=sampler,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
             pin_memory=True,
             multiprocessing_context="spawn" if num_workers > 0 else None,
             persistent_workers=num_workers > 0,
-            num_workers=num_workers,
-            sampler=test_sampler,
         )
+
+    def _get_loader(self, dataset, batch_size: int, train: bool = True):
+        """Create the appropriate loader for train or test.
+
+        For model parallel training, uses RoundRobinLoader with ChunkedDistributedSamplers.
+        For test, uses fewer workers and a simpler sampler setup.
+        """
+        workers = self.dataloader_num_workers
+        prefetch_factor = self.dataloader_prefetch_factor
+        cfg = self.distributed_config
+
+        # For test with no model parallelism, use fewer workers
+        if not train and self.model_parallel == 1 and workers > 0:
+            workers = min(
+                self.valid_min_samples // (self.batch_size),
+                workers,
+            )
+            prefetch_factor = min(prefetch_factor, 4)
+
+        if isinstance(dataset, torch.utils.data.IterableDataset):
+            # Iterable datasets don't use samplers
+            return self._create_dataloader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=workers,
+                prefetch_factor=prefetch_factor,
+            )
+
+        if self.model_parallel > 1 and train:
+            # For model parallel: use round-robin loader with chunked samplers
+            # Create one dataloader per worker, each with its own chunk assignment
+            # Then round-robin between them to simulate iterable-style behavior
+            num_loaders = max(workers, 1)
+            dataloaders = []
+
+            for worker_id in range(num_loaders):
+                worker_sampler = ChunkedDistributedSampler(
+                    dataset,
+                    chunk_size=self.era5_chunk_size,
+                    num_replicas=cfg.data_world_size * num_loaders,
+                    rank=cfg.data_rank * num_loaders + worker_id,
+                    shuffle=train,
+                    shuffle_within_chunk=train,
+                    drop_last=True,
+                    seed=self.cur_nimg,
+                )
+                worker_loader = self._create_dataloader(
+                    dataset,
+                    batch_size=batch_size,
+                    sampler=worker_sampler,
+                    num_workers=1,  # single worker per loader
+                    prefetch_factor=prefetch_factor,
+                )
+                dataloaders.append(worker_loader)
+
+            return RoundRobinLoader(dataloaders)
+
+        sampler = samplers.distributed_split(
+            samplers.subsample(dataset, min_samples=self.valid_min_samples)
+        )
+
+        return self._create_dataloader(
+            dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            num_workers=workers,
+            prefetch_factor=prefetch_factor,
+        )
+
+    def get_data_loaders(self, batch_gpu):
+        dataset = self.get_dataset(train=True)
+        train_loader = self._get_loader(dataset, batch_size=batch_gpu, train=True)
+
+        test_dataset = self.get_dataset(train=False)
+        test_loader = self._get_loader(test_dataset, batch_size=batch_gpu, train=False)
 
         self._test_dataset = test_dataset
         return dataset, train_loader, test_loader
@@ -355,12 +495,132 @@ class TrainingLoop(loop.TrainingLoopBase):
 
         return D
 
+    def _set_random_seeds(self):
+        """Override to use data_rank for model parallelism.
+
+        All model parallel ranks processing the same sample get identical
+        random states for sigma sampling, frame masking, etc.
+        """
+        cfg = self.distributed_config
+        np.random.seed(
+            (self.seed * cfg.data_world_size + cfg.data_rank + self.cur_nimg)
+            % (1 << 31)
+        )
+        torch.manual_seed(np.random.randint(1 << 31))
+        random.seed(np.random.randint(1 << 31))
+
+    def _check_mp_timestamps(self, timestamp):
+        """Verify timestamps are sequential across model parallel ranks.
+
+        Each rank has a shard of T; when gathered, they should form a
+        contiguous sequence with time_step intervals.
+        """
+        if not self.check_mp_batch or self.model_parallel <= 1:
+            return
+
+        model_world_size = self.distributed_config.model_world_size
+        model_group = self._device_mesh.get_group(1)
+
+        # Gather timestamps from all model parallel ranks
+        gather_list = [torch.empty_like(timestamp) for _ in range(model_world_size)]
+        torch.distributed.all_gather(
+            gather_list, timestamp.contiguous(), group=model_group
+        )
+
+        # Concatenate along time dimension: (B, T_local) -> (B, T_full)
+        all_timestamps = torch.cat(gather_list, dim=1)
+
+        # Check that timestamps are sequential with time_step intervals
+        expected_diff = self.time_step * 3600  # time_step is in hours
+        diffs = torch.diff(all_timestamps, dim=1)
+
+        if not torch.all(diffs == expected_diff):
+            times = all_timestamps.cpu().numpy().astype("datetime64[s]")
+            raise ValueError(
+                f"Timestamps not sequential across MP ranks: {times}\n"
+                f"Expected diff: {expected_diff}s, got: {diffs.cpu().numpy()}\n"
+                "This indicates model parallelism is not set up correctly."
+            )
+
+    def _check_mp_sigma(self, sigma):
+        """Verify sigma is identical across model parallel ranks.
+
+        All MP ranks processing the same sample should have the same sigma
+        (ensured by synchronized RNG seeding).
+        """
+        if not self.check_mp_batch or self.model_parallel <= 1:
+            return
+
+        model_world_size = self.distributed_config.model_world_size
+        model_group = self._device_mesh.get_group(1)
+
+        # Gather sigma from all model parallel ranks
+        gather_list = [torch.empty_like(sigma) for _ in range(model_world_size)]
+        torch.distributed.all_gather(gather_list, sigma.contiguous(), group=model_group)
+
+        # All sigmas should be identical
+        reference = gather_list[0]
+        for i, s in enumerate(gather_list[1:], 1):
+            if not torch.allclose(reference, s):
+                raise ValueError(
+                    f"Sigma mismatch across MP ranks!\n"
+                    f"Rank 0 sigma: {reference.cpu()}\n"
+                    f"Rank {i} sigma: {s.cpu()}\n"
+                    "This indicates RNG is not synchronized across MP ranks."
+                )
+
+    def _check_mp_rng_sync(self):
+        """Verify RNG state is identical across model parallel ranks.
+
+        Generate test random numbers and compare across ranks.
+        """
+        if not self.check_mp_batch or self.model_parallel <= 1:
+            return
+
+        model_world_size = self.distributed_config.model_world_size
+        model_group = self._device_mesh.get_group(1)
+        device = torch.device("cuda")
+
+        # Generate test random numbers from each RNG
+        test_torch = torch.randn(4, device=device)
+        test_np = torch.tensor(np.random.rand(4), device=device, dtype=torch.float32)
+        test_random = torch.tensor([random.random() for _ in range(4)], device=device)
+
+        for name, test_val in [
+            ("torch", test_torch),
+            ("numpy", test_np),
+            ("random", test_random),
+        ]:
+            gather_list = [torch.empty_like(test_val) for _ in range(model_world_size)]
+            torch.distributed.all_gather(
+                gather_list, test_val.contiguous(), group=model_group
+            )
+
+            reference = gather_list[0]
+            for i, val in enumerate(gather_list[1:], 1):
+                if not torch.allclose(reference, val, rtol=1e-5, atol=1e-5):
+                    raise ValueError(
+                        f"{name} RNG mismatch across MP ranks!\n"
+                        f"Rank 0: {reference.cpu()}\n"
+                        f"Rank {i}: {val.cpu()}\n"
+                        "RNG is not synchronized across MP ranks."
+                    )
+
     def train_step(self, *, target, timestamp=None, **batch):
+        # Sanity checks for model parallel setup
+        if timestamp is not None:
+            self._check_mp_timestamps(timestamp)
+        self._check_mp_rng_sync()
+
         loss: cbottle.loss.Output = self.loss_fn(
             self._curry_net(self.ddp, batch),
             target,
             classifier_labels=batch.get("classifier_labels"),
         )
+
+        # Check sigma is identical across MP ranks (RNG sync check)
+        self._check_mp_sigma(loss.sigma)
+
         training_stats.report("Loss/denoising", loss.denoising)
         self._train_sigma_metric.update(loss.sigma, loss.denoising)
         if loss.classification is not None:
@@ -453,6 +713,9 @@ class TrainingLoop(loop.TrainingLoopBase):
             )
 
     def sample(self, batch):
+        assert (
+            self.model_parallel == 1
+        ), "sample() not supported with model_parallel > 1"
         if self.regression:
             return sample_regression(self.net, batch, batch_info=self.batch_info)
         else:
@@ -549,6 +812,13 @@ class TrainingLoop(loop.TrainingLoopBase):
 
             return averages
 
+        if self.time_step == 6:
+            global_times_to_visualize = [0, 1, 2, 3]
+        elif self.time_step == 1:
+            global_times_to_visualize = [0, 1, 6, 12, 18]
+        else:
+            global_times_to_visualize = list(range(min(self.time_length, 4)))
+
         d = None
         for batch_num, batch in enumerate(self.valid_loader):
             if (
@@ -568,6 +838,17 @@ class TrainingLoop(loop.TrainingLoopBase):
             hpx = net.domain._grid
             ring_images = hpx.reorder(earth2grid.healpix.PixelOrder.RING, images)
 
+            # TODO: Make tensorboard logging distributed/more efficient for video models
+            # For now, limit frames to avoid long image logging times
+            # Use actual local time dimension from data, not self.time_length (which is full T)
+            t_local = images.shape[2]  # [b, c, t, x]
+            time_length_to_log = min(t_local, 4)
+
+            # Compute time offset for this rank's frames
+            cfg = self.distributed_config
+            t_splits = compute_t_split(self.time_length, cfg.model_world_size)
+            t_offset = sum(t_splits[: cfg.model_rank])  # 0 for model size 0
+
             with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
                 d = sample_from_condition(
                     net,
@@ -576,16 +857,17 @@ class TrainingLoop(loop.TrainingLoopBase):
                     regression=self.regression,
                     sigma_max=self.sigma_max,
                     sigma_min=self.sigma_min,
+                    t_bounds=(t_offset, t_offset + t_local),
                 )
-
-            # TODO: Make tensorboard logging distributed/more efficient for video models
-            # For now, limit frames to avoid long image logging times
-            time_length = min(self.time_length, 4)
 
             for j in range(len(times)):
                 first_frame_time = times[j]
-                for t in range(time_length):
-                    time_idx = first_frame_time + self.batch_info.get_time_delta(t)
+                for t in range(time_length_to_log):
+                    # Use global time index for time delta calculation
+                    global_t = t_offset + t
+                    time_idx = first_frame_time + self.batch_info.get_time_delta(
+                        global_t
+                    )
 
                     season = seasons_by_month[time_idx.month]
                     for field in d:
@@ -629,27 +911,59 @@ class TrainingLoop(loop.TrainingLoopBase):
                 else:
                     averages[f"JJA-DJF/{field}/{source}"] = jja - djf
 
+        # Gather frames for visualization to rank 0
+        if cfg.model_world_size > 1:
+            model_group = self._device_mesh.get_group(1)
+
+            # Gather ring_images: (B, C, T_local, X) -> (B, C, T_full, X)
+            ring_list = [
+                torch.empty_like(ring_images) for _ in range(cfg.model_world_size)
+            ]
+            torch.distributed.all_gather(
+                ring_list, ring_images.contiguous(), group=model_group
+            )
+            full_ring_images = torch.cat(ring_list, dim=2)
+
+            # Gather d: stack all fields, one all_gather, then unstack
+            # Each field is (B, T_local, X) -> stack to (num_fields, B, T_local, X)
+            field_names = list(d.keys())
+            stacked_d = torch.stack(
+                [d[f] for f in field_names], dim=0
+            )  # (F, B, T_local, X)
+            d_list = [torch.empty_like(stacked_d) for _ in range(cfg.model_world_size)]
+            torch.distributed.all_gather(
+                d_list, stacked_d.contiguous(), group=model_group
+            )
+            full_stacked_d = torch.cat(d_list, dim=2)  # (F, B, T_full, X)
+            full_d = {f: full_stacked_d[i] for i, f in enumerate(field_names)}
+        else:
+            full_ring_images = ring_images
+            full_d = d
+
+        # Visualize on rank 0
         if dist.get_rank() == 0:
-            for t in range(time_length):
-                for field in d:
-                    array = d[field]
-                    visualize(array[0, t])
+            for global_t in global_times_to_visualize:
+                for field in full_d:
+                    visualize(full_d[field][0, global_t])
                     self.writer.add_figure(
-                        f"sample/{field}/generated/{t}",
+                        f"sample/{field}/generated/{global_t}",
                         plt.gcf(),
                         global_step=self.cur_nimg,
                     )
 
-                for j in range(images.size(1)):
+                for c in range(full_ring_images.size(1)):
                     b = self.batch_info
-                    visualize(ring_images[0, j, t] * b.scales[j] + b.center[j])
-                    field = b.channels[j]
+                    visualize(
+                        full_ring_images[0, c, global_t] * b.scales[c] + b.center[c]
+                    )
+                    field = b.channels[c]
                     self.writer.add_figure(
-                        f"sample/{field}/truth/{t}",
+                        f"sample/{field}/truth/{global_t}",
                         plt.gcf(),
                         global_step=self.cur_nimg,
                     )
 
+        if dist.get_rank() == 0:
             for key in averages:
                 visualize(averages[key])
                 self.writer.add_figure(key, plt.gcf(), global_step=self.cur_nimg)

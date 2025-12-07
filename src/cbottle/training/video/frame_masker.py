@@ -17,6 +17,7 @@ import random
 from typing import Optional
 from dataclasses import asdict
 from cbottle.config.training.masking import MaskingConfig
+from cbottle.models.distributed import compute_t_split
 
 
 class FrameMasker:
@@ -41,18 +42,85 @@ class FrameMasker:
 
     If keep_frames is provided, it overrides masking_config. If both are None, it will
     mask all frames.
+
+    For distributed model parallelism, set model_rank, model_world_size, and t_full.
+    The masker will compute a global mask and slice to the local time range.
     """
 
     def __init__(
         self,
         masking_config: Optional[MaskingConfig] = None,
         keep_frames: Optional[list[int]] = None,
+        model_rank: int = 0,
+        model_world_size: int = 1,
+        t_full: Optional[int] = None,
     ):
         if keep_frames is None and masking_config is None:
             keep_frames = []
 
         self.config = masking_config
         self.keep_frames = keep_frames
+        self.model_rank = model_rank
+        self.model_world_size = model_world_size
+        self.t_full = t_full
+
+    def _compute_global_mask_indices(self, t_full: int, strategy_name: str):
+        """Compute which global frame indices should be masked (set to 0).
+
+        Args:
+            t_full: Total number of frames
+            strategy_name: The masking strategy to use
+
+        Returns a list of global indices to mask.
+
+        Note: Uses global random module, which is seeded at loop level using
+        data_rank to ensure all MP ranks get identical mask decisions.
+        """
+        if strategy_name == "random":
+            attempts = 0
+            while attempts < 10:
+                bernoulli_mask = [
+                    random.random() < self.config.random_mask_prob
+                    for _ in range(t_full)
+                ]
+                indices_to_mask = [i for i, m in enumerate(bernoulli_mask) if m]
+                num_masked = len(indices_to_mask)
+                if num_masked >= max(1, int(t_full * 0.5)) and num_masked < t_full:
+                    break
+                attempts += 1
+
+            if attempts == 10:
+                indices_to_mask = random.sample(
+                    range(t_full), int(t_full * self.config.random_mask_prob)
+                )
+            return indices_to_mask
+
+        elif strategy_name == "blockwise":
+            num_to_mask = round(t_full * self.config.block_mask_fraction)
+            num_to_mask -= int(random.random() < 0.2)
+            mask_past = (
+                random.random() < 0.5 if self.config.block_predict_past else False
+            )
+            if mask_past:
+                return list(range(num_to_mask))
+            else:
+                return list(range(t_full - num_to_mask, t_full))
+
+        elif strategy_name == "interpolation":
+            num_to_mask = max(
+                1, round(t_full * self.config.interpolation_mask_fraction)
+            )
+            if num_to_mask > t_full - 2:
+                num_to_mask = t_full - 2
+            return random.sample(range(1, t_full - 1), num_to_mask)
+
+        elif strategy_name == "full_dropout":
+            return list(range(t_full))
+
+        elif strategy_name == "specific_frames":
+            return [i for i in range(t_full) if i not in self.keep_frames]
+
+        return []
 
     def __call__(self, batch):
         batch = {**batch}
@@ -61,10 +129,17 @@ class FrameMasker:
 
         if not has_batch_dim:
             target = target.unsqueeze(0)
-        B, C, T, X = target.shape
-        mask = torch.ones((B, 1, T, X), dtype=torch.bool, device=target.device)
+        B, C, T_local, X = target.shape
 
-        # Select masking strategy
+        # Determine full T and local T range
+        if self.model_world_size > 1 and self.t_full is not None:
+            t_full = self.t_full
+            t_splits = compute_t_split(t_full, self.model_world_size)
+            t_start = sum(t_splits[: self.model_rank])
+        else:
+            t_full = T_local
+            t_start = 0
+
         if self.keep_frames is not None:
             strategy_name = "specific_frames"
         else:
@@ -75,61 +150,21 @@ class FrameMasker:
                 k=1,
             )[0]
 
-        if strategy_name == "random":
-            # For each frame, "flip a coin" whether to mask or not
-            attempts = 0
-            while attempts < 10:
-                bernoulli_mask = torch.tensor(
-                    [random.random() < self.config.random_mask_prob for _ in range(T)],
-                    dtype=torch.bool,
-                    device=target.device,
-                )
-                indices_to_mask = torch.nonzero(bernoulli_mask).squeeze()
-                num_masked = indices_to_mask.numel()
-                if num_masked >= max(1, int(T * 0.5)) and num_masked < T:
-                    break
-                attempts += 1
+        global_indices_to_mask = self._compute_global_mask_indices(
+            t_full, strategy_name
+        )
 
-            if attempts == 10:
-                indices_to_mask = random.sample(
-                    range(T), int(T * self.config.random_mask_prob)
-                )
+        # Convert global indices to local indices
+        local_indices_to_mask = [
+            i - t_start
+            for i in global_indices_to_mask
+            if t_start <= i < t_start + T_local
+        ]
 
-            mask[:, :, indices_to_mask, :] = 0
-
-        elif strategy_name == "blockwise":
-            # Mask either the first or last num_to_mask contiguous frames
-            num_to_mask = round(T * self.config.block_mask_fraction)
-            num_to_mask -= int(random.random() < 0.2)
-
-            mask_past = (
-                random.random() < 0.5 if self.config.block_predict_past else False
-            )
-            if mask_past:
-                mask[:, :, :num_to_mask, :] = 0
-            else:
-                mask[:, :, T - num_to_mask :, :] = 0
-
-        elif strategy_name == "interpolation":
-            # Mask interior frames, keep endpoints
-            num_to_mask = max(1, round(T * self.config.interpolation_mask_fraction))
-            if num_to_mask > T - 2:
-                num_to_mask = T - 2
-            indices_to_mask = random.sample(range(1, T - 1), num_to_mask)
-            mask[:, :, indices_to_mask, :] = 0
-
-        elif strategy_name == "full_dropout":
-            # Mask all frames (unconditional)
-            mask[:, :, :, :] = 0
-
-        elif strategy_name == "specific_frames":
-            # Keep only the specified frames (for inference)
-            mask[:, :, :, :] = 0
-            valid_indices = [i for i in self.keep_frames if 0 <= i < T]
-            if len(valid_indices) != len(self.keep_frames):
-                raise ValueError(f"Invalid keep_frames: {self.keep_frames}")
-
-            mask[:, :, valid_indices, :] = 1
+        # Build local mask
+        mask = torch.ones((B, 1, T_local, X), dtype=torch.bool, device=target.device)
+        if local_indices_to_mask:
+            mask[:, :, local_indices_to_mask, :] = 0
 
         if not has_batch_dim:
             mask = mask.squeeze(0)

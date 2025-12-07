@@ -44,6 +44,7 @@ from cbottle.models.embedding import (
     FourierEmbedding,
     PositionalEmbedding,
 )
+from cbottle.models.distributed import shard_x_bctx as shard_x, shard_t_bctx as shard_t
 
 
 if torch.cuda.is_available():
@@ -792,6 +793,20 @@ class UNetBlock(torch.nn.Module):
                 use_apex_groupnorm=factory.use_apex_groupnorm,
             )
 
+        # Model parallel attributes
+        self._parallel_group = None
+        self._t_full = None
+
+    def set_parallel_group(self, group, t_full=None):
+        """Set the model parallel group for temporal attention sharding.
+
+        Args:
+            group: The process group for model parallelism
+            t_full: Total time length across all ranks
+        """
+        self._parallel_group = group
+        self._t_full = t_full
+
     def forward(self, x, emb):
         # TODO add a flag controlling this
         if self.checkpoint:
@@ -823,7 +838,11 @@ class UNetBlock(torch.nn.Module):
             x = x * self.skip_scale
 
         if self.temporal_attention:
+            if self._parallel_group is not None:
+                x = shard_x(x, self._parallel_group, t_full=self._t_full)
             x = self.skip_scale * (self.temporal_attention(x) + x)
+            if self._parallel_group is not None:
+                x = shard_t(x, self._parallel_group, t_full=self._t_full)
 
         return x
 
@@ -1373,6 +1392,25 @@ class SongUNet(torch.nn.Module):
         res = res.to(dtype=x.dtype).contiguous(memory_format=mf)
         return res
 
+    def set_parallel_group(self, group, t_full=None):
+        """Set the model parallel group for temporal attention sharding.
+
+        Propagates the parallel group to all encoder and decoder blocks
+        that have temporal attention.
+
+        Args:
+            group: The process group for model parallelism
+            t_full: Total time length across all ranks (defaults to self.time_length)
+        """
+        if t_full is None:
+            t_full = self.time_length
+
+        for name, block in self.enc.items():
+            block.set_parallel_group(group, t_full)
+
+        for name, block in self.dec.items():
+            block.set_parallel_group(group, t_full)
+
     def forward(
         self,
         x,
@@ -1585,6 +1623,18 @@ class EDMPrecond(torch.nn.Module):
 
     def round_sigma(self, sigma):
         return torch.as_tensor(sigma)
+
+    def set_parallel_group(self, group, t_full=None):
+        """Set the model parallel group, propagating to the underlying model.
+
+        Args:
+            group: The process group for model parallelism
+            t_full: Total time length across all ranks
+        """
+        try:
+            self.model.set_parallel_group(group, t_full)
+        except Exception as e:
+            raise ValueError(f"Could not set parallel group on model: {e}")
 
 
 class EDMPrecondLegacy(EDMPrecond):

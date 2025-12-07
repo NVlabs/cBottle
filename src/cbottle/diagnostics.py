@@ -149,6 +149,9 @@ def sample_from_condition(
     sigma_max: float,
     sigma_min: float,
     seeds=None,
+    t_bounds: tuple[
+        int, int
+    ] = None,  # (start, end) for MP, uses net.time_length for full
 ):
     """
     example of output format
@@ -181,20 +184,31 @@ def sample_from_condition(
             else:
                 rnd = StackedRandomGenerator(device, seeds=seeds)
 
-            latents = rnd.randn(
-                (
-                    labels.shape[0],
-                    net.img_channels,
-                    net.time_length,
-                    net.domain.numel(),
-                ),
+            # Generate full latents and slice to keep all mp ranks with same rng state
+            t_full = net.time_length
+            t_start, t_end = t_bounds if t_bounds is not None else (0, t_full)
+
+            full_latents = rnd.randn(
+                (labels.shape[0], net.img_channels, t_full, net.domain.numel()),
                 device=device,
             )
+            latents = full_latents[:, :, t_start:t_end, :]
+
+            def randn_like(x):
+                full_noise = torch.randn(
+                    x.shape[0],
+                    x.shape[1],
+                    t_full,
+                    x.shape[3],
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                return full_noise[:, :, t_start:t_end, :]
 
             out = diffusion_samplers.edm_sampler(
                 curry_denoiser(net, class_labels=labels, condition=condition, **batch),
                 latents,
-                randn_like=torch.randn_like,
+                randn_like=randn_like,
                 sigma_max=sigma_max,
                 sigma_min=sigma_min,
             )
