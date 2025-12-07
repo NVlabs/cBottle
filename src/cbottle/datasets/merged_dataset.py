@@ -16,11 +16,127 @@ from zarr.core.sync import sync
 import torch
 import math
 import pandas as pd
-import cftime
 import numpy as np
 import asyncio
 from typing import Callable
 import cbottle.datetime
+import logging
+from cbottle.models.distributed import compute_t_split
+
+logger = logging.getLogger(__name__)
+
+
+class _FrameIndexGenerator:
+    """Handles frame index generation with striding, permuting, and model rank slicing."""
+
+    def __init__(
+        self,
+        times,
+        time_length: int,
+        frame_step: int,
+        model_rank: int,
+        model_world_size: int,
+    ):
+        """
+        Args:
+            times: Time array to split into contiguous segments
+            time_length: Number of frames per window
+            frame_step: Step size between frames
+            model_rank: Model rank for distributed training
+            model_world_size: Total number of model ranks
+        """
+        self.time_length = time_length
+        self.frame_step = frame_step
+        self.model_rank = model_rank
+        self.model_world_size = model_world_size
+
+        # to handle uneven T splits
+        self.t_splits = compute_t_split(time_length, model_world_size)
+        self.t_local = self.t_splits[model_rank]
+        self.t_offsets = [0] + list(np.cumsum(self.t_splits[:-1]))
+
+        # Split times into contiguous segments and compute sizes
+        self.segments = _split_array_contiguous(times)
+        self.sizes = [len(segment) for segment in self.segments]
+
+        self.total_samples = sum(self.sizes)
+
+        # Calculate valid lengths for each segment
+        frames_per_window = (time_length - 1) * frame_step + 1
+        self.segment_valid_lengths = []
+        for segment in self.segments:
+            segment_valid_length = len(segment) - frames_per_window + 1
+            if segment_valid_length > 0:
+                self.segment_valid_lengths.append(segment_valid_length)
+            else:
+                self.segment_valid_lengths.append(0)
+
+        # Precompute cumulative sizes for efficient mapping
+        self.cumulative_valid_sizes = [0] + list(np.cumsum(self.segment_valid_lengths))
+        self.cumulative_sizes = [0] + list(np.cumsum(self.sizes))
+        self.valid_length = sum(self.segment_valid_lengths)
+
+    def generate_frame_indices(self, sample_indices: torch.Tensor) -> list[int]:
+        """Generate frame indices from sample indices with striding and model rank slicing.
+
+        Args:
+            sample_indices: Tensor of logical sample indices for each sample in the batch
+
+        Returns:
+            List of frame indices to load
+        """
+        frame_idxs = []
+        for sample_idx in sample_indices:
+            # Map logical sample index to physical frame index
+            physical_idx = self._map_logical_to_physical(sample_idx)
+
+            # Create frame range with striding
+            frames = list(
+                range(
+                    physical_idx,
+                    physical_idx + self.time_length * self.frame_step,
+                    self.frame_step,
+                )
+            )
+            # Apply model rank slicing
+            start = self.t_offsets[self.model_rank]
+            end = start + self.t_local
+            frames = frames[start:end]
+            frame_idxs.append(frames)
+        return frame_idxs
+
+    def _map_logical_to_physical(self, logical_idx: int) -> int:
+        """Map logical sample index to physical frame index across segments."""
+        if logical_idx >= self.total_samples:
+            raise IndexError(
+                f"Sample index {logical_idx} out of bounds for {self.total_samples} samples"
+            )
+
+        # Find which segment this logical index belongs to
+        segment_idx = 0
+        for i, cum_size in enumerate(self.cumulative_valid_sizes[1:], 1):
+            if logical_idx < cum_size:
+                segment_idx = i - 1
+                break
+
+        # Calculate offset within the segment
+        segment_start = self.cumulative_sizes[segment_idx]
+        offset_within_segment = logical_idx - self.cumulative_valid_sizes[segment_idx]
+
+        # Return the physical frame index in the original times array
+        return segment_start + offset_within_segment
+
+    def get_valid_length(self) -> int:
+        """Get the total valid length across all segments."""
+        return self.valid_length
+
+
+def _validate_times(times, world_size, time_length, frame_step):
+    if len(times) < world_size:
+        raise ValueError(f"Not enough times provided. Received {len(times)=}.")
+
+    if time_length == 1 and frame_step != 1:
+        raise ValueError("Frame_step must be 1 for image setting")
 
 
 class _MergedLoader:
@@ -99,19 +215,9 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
         frame_step: int = 1,
         window_stride: int = 1,
     ):
-        if len(times) < world_size:
-            raise ValueError(f"Not enough times provided. Received {len(times)=}.")
-
-        if time_length == 1 and frame_step != 1:
-            raise ValueError("Frame_step must be 1 for image setting")
+        _validate_times(times, world_size, time_length, frame_step)
 
         frames_per_window = (time_length - 1) * frame_step + 1
-        if chunk_size < frames_per_window:
-            raise ValueError(
-                f"Chunk size {chunk_size} is too small to fit a window of length "
-                f"{time_length} with step {frame_step} (needs {frames_per_window} frames)"
-            )
-
         self._loader = _MergedLoader(time_loaders)
         self.rank = rank
         self.world_size = world_size
@@ -184,11 +290,12 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
         num_workers = 1 if info is None else info.num_workers
         worker_id = 0 if info is None else info.id
 
+        # Shard chunks across the data workers. Shard before shuffle so that all workers
+        # have the same sharding pattern and each is assigned a unique set of chunks
+        chunk_idxs = _split(chunk_idxs, worker_id, num_workers, drop_extra=False)
+
         if self.shuffle:
             self._generator_shuffle(chunk_idxs, info)
-
-        # Shard chunks across the data workers
-        chunk_idxs = _split(chunk_idxs, worker_id, num_workers, drop_extra=False)
 
         for chunk_idx in chunk_idxs:
             if chunk_idx > self.max_valid_chunk_idx:
@@ -228,13 +335,6 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
 
 
 class TimeMergedMapStyle(torch.utils.data.Dataset):
-    """
-    Map-style version of TimeMergedIterable that simply reads required data
-    (without explicit chunking) for each data window without any worker sharding.
-
-    Designed primarily as dataset for validation/inference.
-    """
-
     def __init__(
         self,
         times,
@@ -243,50 +343,147 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         time_length: int = 1,
         frame_step: int = 1,
         transform: Callable,
+        cache_chunk_size: int = 0,
+        model_rank=0,
+        model_world_size=1,
+        batch_transform=None,
     ):
-        if time_length == 1 and frame_step != 1:
-            raise ValueError("Frame_step must be 1 for image setting")
+        """
+        Args:
+            cache_chunk_size: if nonzero, then cache data in this chunk size, so that
+                data cn be accessed efficiently in sequence.
+            batch_size: if provided
 
+        """
+        _validate_times(times, model_world_size, time_length, frame_step)
         self.times = times
         self.transform = transform
+        self.batch_transform = batch_transform
         self.time_length = time_length
         self.frame_step = frame_step
+        self.model_rank = model_rank
+        self.model_world_size = model_world_size
         self._loader = _MergedLoader(time_loaders)
 
-        # can only use idxs that can create a full window
+        self._frame_indexer = _FrameIndexGenerator(
+            times, time_length, frame_step, model_rank, model_world_size
+        )
+
+        # Get valid length from frame indexer
+        self.valid_length = self._frame_indexer.get_valid_length()
         frames_per_window = (self.time_length - 1) * self.frame_step + 1
-        self.valid_length = len(times) - frames_per_window + 1
         if self.valid_length <= 0:
             raise ValueError(
                 f"Dataset too small for window length. Need {frames_per_window} "
-                f"frames but only got {len(times)}"
+                f"frames but segments have lengths {self._frame_indexer.sizes}"
             )
+        self.t_local = self._frame_indexer.t_local  # model parallel T split
+        self.local_frame_span = (self.t_local - 1) * self.frame_step + 1
+        self.overlap = self.local_frame_span - 1  # extra frames beyond first sample
+        self.load_chunk_size = self.cache_chunk_size + self.overlap
+
+        # Offset for cache boundaries: this rank's frames start at t_offset * frame_step
+        self._cache_offset = self._frame_indexer.t_offsets[model_rank] * self.frame_step
+        self._cache_id = None
+        self._cache_start = 0
+        self._cache_end = 0
+        self._cache_data = None
 
     def __len__(self):
-        return self.valid_length
+        return self._frame_indexer.get_valid_length()
+
+    def _load(self, frame_idxs):
+        if not self.cache_chunk_size:
+            window_times = self.times[list(frame_idxs)]
+            window_data = sync(self._loader.sel_time(window_times))
+            return [
+                {k: v[i] for k, v in window_data.items()}
+                for i in range(len(window_times))
+            ]
+
+        frames = []
+        # TODO this caching logic only works well if frame_idxs is sequential.
+        # otherwise it will results in many cache misses. --improved for random access but within a chunk
+        for i in frame_idxs:
+            if not (self._cache_start <= i < self._cache_end):
+                cache_id = (i - self._cache_offset) // self.cache_chunk_size
+                self._cache_start = (
+                    cache_id * self.cache_chunk_size + self._cache_offset
+                )
+                self._cache_end = min(
+                    self._cache_start + self.load_chunk_size, len(self.times)
+                )
+                window_times = self.times[self._cache_start : self._cache_end]
+                window_data = sync(self._loader.sel_time(window_times))
+                self._cache_data = [
+                    {k: v[i] for k, v in window_data.items()}
+                    for i in range(len(window_times))
+                ]
+
+                self._cache_id = cache_id
+            frames.append(self._cache_data[i - self._cache_start])
+        return frames
 
     def __getitem__(self, idx):
-        if idx < 0 or idx >= self.valid_length:
+        result = self.__getitems__([idx])
+        if self.batch_transform:
+            return result
+        else:
+            return result[0]
+
+    def _batch_transform(self, times, frames):
+        if self.batch_transform:
+            return self.batch_transform(times, frames)
+        elif self.transform:
+            output = []
+            for sample_times, sample_frames in zip(times, frames):
+                output.append(self.transform(sample_times, sample_frames))
+            return output
+
+    def _get_times_and_frames(self, idx):
+        if min(idx) < 0 or max(idx) >= self.valid_length:
             raise IndexError(
                 f"Index {idx} out of bounds for dataset of length {self.valid_length}"
             )
 
-        frame_idxs = range(
-            idx, idx + self.time_length * self.frame_step, self.frame_step
-        )
+        batch_size = len(idx)
 
-        window_times = self.times[list(frame_idxs)]
-        window_data = sync(self._loader.sel_time(window_times))
+        frame_idxs = self._frame_indexer.generate_frame_indices(idx)
+        flat_frame_idxs = sum(frame_idxs, start=[])
 
-        frames = []
+        frames = self._load(flat_frame_idxs)
+        window_times = self.times[flat_frame_idxs]
+
         timestamps = []
         for i, time in enumerate(window_times):
-            arr_i = {k: v[i] for k, v in window_data.items()}
-            timestamp = pd.Timestamp(*cftime.to_tuple(time))
+            timestamp = pd.Timestamp(time)
+            cftimestamp = cbottle.datetime.as_cftime(timestamp)
+            timestamps.append(cftimestamp)
 
-            frames.append(arr_i)
-            timestamps.append(timestamp)
+        def reshape(list):
+            n = len(list) // batch_size
+            return [[list[n * i + j] for j in range(n)] for i in range(batch_size)]
 
-        window_tensor = self.transform(timestamps, frames)
+        timestamps = reshape(timestamps)
+        frames = reshape(frames)
 
-        return window_tensor
+        return timestamps, frames
+
+    def __getitems__(self, idx):
+        timestamps, frames = self._get_times_and_frames(idx)
+        return self._batch_transform(timestamps, frames)
+
+
+def _split_array_contiguous(x):
+    d = x[1] - x[0]
+    segments = []
+    start = 0
+    for i in range(1, x.size):
+        if (x[i] - x[i - 1]) != d:
+            segments.append(x[start:i])
+            start = i
+
+    if start < x.size:
+        segments.append(x[start:])
+
+    return segments
