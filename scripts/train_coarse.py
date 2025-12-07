@@ -229,6 +229,19 @@ class TrainingLoop(loop.TrainingLoopBase):
         """Get the model parallel world size."""
         return self.distributed_config.model_world_size
 
+    @functools.cached_property
+    def t_bounds(self) -> tuple[int, int, int]:
+        """Get (t_start, t_end, t_full) for this rank's time slice.
+
+        Used for RNG-aligned noise generation and time indexing.
+        For MP=1: (0, T, T). For MP>1: (offset, offset+local, full).
+        """
+        cfg = self.distributed_config
+        t_splits = compute_t_split(self.time_length, cfg.model_world_size)
+        t_start = sum(t_splits[: cfg.model_rank])
+        t_end = t_start + t_splits[cfg.model_rank]
+        return (t_start, t_end, self.time_length)
+
     @property
     def batch_gpu_total(self) -> int:
         """Total batch size per GPU accounting for model parallelism."""
@@ -616,6 +629,7 @@ class TrainingLoop(loop.TrainingLoopBase):
             self._curry_net(self.ddp, batch),
             target,
             classifier_labels=batch.get("classifier_labels"),
+            t_bounds=self.t_bounds,
         )
 
         # Check sigma is identical across MP ranks (RNG sync check)
@@ -633,6 +647,7 @@ class TrainingLoop(loop.TrainingLoopBase):
             self._curry_net(self.ddp, batch),
             target,
             classifier_labels=batch.get("classifier_labels"),
+            t_bounds=self.t_bounds,
         )
         training_stats.report("Loss/test_denoising", loss.denoising)
         self._test_sigma_metric.update(loss.sigma, loss.denoising)
@@ -838,16 +853,11 @@ class TrainingLoop(loop.TrainingLoopBase):
             hpx = net.domain._grid
             ring_images = hpx.reorder(earth2grid.healpix.PixelOrder.RING, images)
 
-            # TODO: Make tensorboard logging distributed/more efficient for video models
-            # For now, limit frames to avoid long image logging times
-            # Use actual local time dimension from data, not self.time_length (which is full T)
-            t_local = images.shape[2]  # [b, c, t, x]
+            # Use t_bounds for time offset calculations
+            t_start, t_end, _ = self.t_bounds
+            t_local = t_end - t_start
             time_length_to_log = min(t_local, 4)
-
-            # Compute time offset for this rank's frames
             cfg = self.distributed_config
-            t_splits = compute_t_split(self.time_length, cfg.model_world_size)
-            t_offset = sum(t_splits[: cfg.model_rank])  # 0 for model size 0
 
             with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
                 d = sample_from_condition(
@@ -857,14 +867,14 @@ class TrainingLoop(loop.TrainingLoopBase):
                     regression=self.regression,
                     sigma_max=self.sigma_max,
                     sigma_min=self.sigma_min,
-                    t_bounds=(t_offset, t_offset + t_local),
+                    t_bounds=(t_start, t_end),
                 )
 
             for j in range(len(times)):
                 first_frame_time = times[j]
                 for t in range(time_length_to_log):
                     # Use global time index for time delta calculation
-                    global_t = t_offset + t
+                    global_t = t_start + t
                     time_idx = first_frame_time + self.batch_info.get_time_delta(
                         global_t
                     )
