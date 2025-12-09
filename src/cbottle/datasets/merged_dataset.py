@@ -434,7 +434,7 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
                 # Cache miss - log detailed debug info
                 # prev_cache_id = self._cache_id
                 # prev_range = f"[{self._cache_start}:{self._cache_end})"
-                # new_cache_id = (i - self._cache_offset) // self.cache_chunk_size
+                new_cache_id = (i - self._cache_offset) // self.cache_chunk_size
 
                 # worker_info = _get_worker_info(self.model_rank)
                 # hits_str = (

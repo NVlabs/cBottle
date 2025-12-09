@@ -995,8 +995,10 @@ class TrainingLoop(loop.TrainingLoopBase):
             test_time = time.time() - test_start
 
             # Log likelihood is expensive for video - only compute on first batch
-            if self.model_parallel == 1 and (
-                (batch_num % 2 == 0) or self.time_length == 1
+            if (
+                False
+                and self.model_parallel == 1
+                and ((batch_num % 8 == 0) or self.time_length == 1)
             ):
                 ll_start = time.time()
                 with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):

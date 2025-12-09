@@ -27,19 +27,6 @@ import torch.distributed as dist
 import einops
 from torch.distributed.nn.functional import all_to_all_single
 
-# Debug flag - set to True to enable gradient flow debugging
-DEBUG_GRADIENTS = False
-
-
-def _debug_tensor(tensor, name):
-    """Print debug info about tensor's gradient status."""
-    if not DEBUG_GRADIENTS:
-        return
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    print(
-        f"[rank {rank}] {name}: shape={tensor.shape}, requires_grad={tensor.requires_grad}, grad_fn={tensor.grad_fn}"
-    )
-
 
 def unwrap_net(net):
     """Unwrap DDP/compiled network to access model attributes.
@@ -161,7 +148,7 @@ def shard_t(tensor, group, t_full: Optional[int] = None):
         return result
 
     # Uneven path: move T to the front so split sizes are just T counts
-    flat_in = einops.rearrange(tensor, "b t x c -> t b x c")
+    flat_in = einops.rearrange(tensor, "b t x c -> t b x c").contiguous()
 
     input_split_sizes = t_splits  # send t_splits[r] rows to rank r
     output_split_sizes = [t_local] * n  # receive t_local rows from each src
@@ -183,16 +170,16 @@ def shard_t(tensor, group, t_full: Optional[int] = None):
 # UNet variants (channels-first: [b, c, t, x])
 def shard_x_bctx(tensor, group, t_full: Optional[int] = None):
     """Unshard t and shard x for [b, c, t, x] tensors (UNet format)."""
-    tensor = tensor.permute(0, 2, 3, 1)  # [b,c,t,x] -> [b,t,x,c]
+    tensor = tensor.permute(0, 2, 3, 1)
     tensor = shard_x(tensor, group, t_full=t_full)
-    return tensor.permute(0, 3, 1, 2)  # [b,t,x,c] -> [b,c,t,x]
+    return tensor.permute(0, 3, 1, 2)
 
 
 def shard_t_bctx(tensor, group, t_full: Optional[int] = None):
     """Unshard x and shard t for [b, c, t, x] tensors (UNet format)."""
-    tensor = tensor.permute(0, 2, 3, 1)  # [b,c,t,x] -> [b,t,x,c]
+    tensor = tensor.permute(0, 2, 3, 1)
     tensor = shard_t(tensor, group, t_full=t_full)
-    return tensor.permute(0, 3, 1, 2)  # [b,t,x,c] -> [b,c,t,x]
+    return tensor.permute(0, 3, 1, 2)
 
 
 def make_mp_randn_like(t_bounds, t_dim=2):
@@ -221,7 +208,6 @@ def make_mp_randn_like(t_bounds, t_dim=2):
     def randn_like(tensor):
         full_shape = list(tensor.shape)
         full_shape[t_dim] = t_full
-        # Create a dummy tensor with full shape to use randn_like
         full_ref = tensor.new_empty(full_shape)
         full_noise = torch.randn_like(full_ref)
         slices = [slice(None)] * len(full_shape)

@@ -157,6 +157,16 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
         """Rank for data parallelism."""
         return dist.get_rank()
 
+    @property
+    def model_size(self) -> int:
+        """Number of model parallel replicas."""
+        return 1
+
+    @property
+    def model_rank(self) -> int:
+        """Rank for model parallelism."""
+        return 0
+
     def _setup_networks(self):
         self.net = self.get_network()
         self.net.train().requires_grad_(True).to(self.device)
@@ -328,6 +338,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
     def backward_batch(self, dataset_iterator):
         self.ddp.train()
         self.optimizer.zero_grad(set_to_none=True)
+        net = self.net
         total_loss = 0.0
         for round_idx in range(self.num_accumulation_rounds):
             with misc.ddp_sync(
@@ -350,10 +361,13 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                 with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
                     loss = self.train_step(**indict)
                 training_stats.report("Loss/loss", loss)
-                time_length = loss.shape[2]  # (b, c, t, x)
-                loss_mean = loss.sum().mul(
-                    self.loss_scaling / (self.batch_gpu_total * time_length)
+                # time_length = loss.shape[2]  # (b, c, t, x)
+                scale_factor = (
+                    self.loss_scaling
+                    * self.model_size
+                    / (self.batch_gpu_total * net.time_length)
                 )
+                loss_mean = loss.sum().mul(scale_factor)
                 torch.cuda.nvtx.range_push("training_loop:backward")
                 loss_mean.backward()
                 torch.cuda.nvtx.range_pop()
@@ -363,7 +377,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                         training_stats.report("grad_norm", param.grad.norm(2))
 
                 total_loss += loss_mean.detach().cpu() / self.num_accumulation_rounds
-
+        dist.print0(f"scale factor: {scale_factor}")
         return total_loss.item()
 
     def learning_rate(self, cur_nimg: int) -> float:
