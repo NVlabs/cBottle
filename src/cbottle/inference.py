@@ -482,6 +482,7 @@ class CBottle3d:
         guidance_pixels: torch.Tensor | None = None,
         guidance_scale: float = 0.03,
         bf16=True,
+        pre_generated_latents: torch.Tensor | None = None,
     ):
         """
         Args:
@@ -506,20 +507,29 @@ class CBottle3d:
         mask = mask[:, :, None, None]
 
         with torch.no_grad():
-            if seed is None:
-                rnd = torch
-            else:
-                rnd = StackedRandomGenerator(self.device, seeds=[seed] * batch_size)
+            device = condition.device
 
-            latents = rnd.randn(
-                (
-                    batch_size,
-                    self.net.img_channels,
-                    self.time_length,
-                    self.net.domain.numel(),
-                ),
-                device=self.device,
-            )
+            if pre_generated_latents is not None:
+                # Use pre-generated latents (e.g., from CorrelatedLatentGenerator)
+                latents = pre_generated_latents
+                if latents.device != device:
+                    latents = latents.to(device)
+            else:
+                # Generate new latents
+                if seed is None:
+                    rnd = torch
+                else:
+                    rnd = StackedRandomGenerator(device, seeds=[seed] * batch_size)
+
+                latents = rnd.randn(
+                    (
+                        batch_size,
+                        self.net.img_channels,
+                        self.time_length,
+                        self.net.domain.numel(),
+                    ),
+                    device=self.device,
+                )
 
             if self.channels_last:
                 latents = latents.to(memory_format=torch.channels_last)
@@ -1122,4 +1132,16 @@ def load(model: str, root="", **kwargs) -> CBottle3d:
             allow_second_order_derivatives=True,
             **kwargs,
         )
+
+    elif model == "cbottle-3d-moe-aimip":
+        checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(  # v1
+            # checkpoints = "training-state-000512000.checkpoint,training-state-002176000.checkpoint,training-state-009984000.checkpoint".split( # v2
+            # checkpoints = "training-state-000640000.checkpoint,training-state-002048000.checkpoint,training-state-010112000.checkpoint".split( # v3
+            # checkpoints = "training-state-000640000.checkpoint,training-state-002176000.checkpoint,training-state-009728000.checkpoint".split( # v4 and v5
+            ","
+        )
+        rundir = "aimip_v3"
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+
     raise ValueError(model)
