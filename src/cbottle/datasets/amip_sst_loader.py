@@ -13,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import urllib.parse
-import tempfile
+import datetime
+import os
 import shutil
+import sys
+import tempfile
+import urllib.parse
 import earth2grid
+import requests
 import torch
 import xarray
-import sys
-import datetime
 
 from cbottle.config import environment as config
 from cbottle.storage import get_storage_options
@@ -42,14 +44,22 @@ AIMIP_SST_URL = (
 
 
 def _download_sst(output_path: Path):
+    """Download the AMIP SST data from NGC
+
+    This is much faster than the THREDDS server above
+    """
+
     print(f"Downloading SST data to {output_path} ...", file=sys.stderr)
-    ds = xarray.open_dataset(AMIP_SST_URL)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_out = tempfile.mktemp(
-        dir=output_path.parent.as_posix(), prefix=output_path.name
-    )
-    ds.to_netcdf(tmp_out)  # Save to netCDF
-    shutil.move(tmp_out, output_path)
+
+    url = "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/earth-2/cbottle/1.2/files?redirect=true&path=amip_midmonth_sst.nc"
+    output_file = "amip_midmonth_sst.nc"
+    with tempfile.TemporaryDirectory() as dir_:
+        tmp_out = os.path.join(dir_, output_file)
+
+        response = requests.get(url, allow_redirects=True)
+        with open(tmp_out, "wb") as file:
+            file.write(response.content)
+            shutil.move(tmp_out, output_path)
     print("Successfully downloaded SST data", file=sys.stderr)
 
 
