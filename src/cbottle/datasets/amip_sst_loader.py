@@ -152,7 +152,7 @@ class AmipSSTLoader:
         return self._regridder(arr)
 
 
-class AIMIP_SSTLoader(AmipSSTLoader):
+class AImip_SSTLoader(AmipSSTLoader):
     """AIMIP SST Forcing dataset"""
 
     path = config.AIMIP_1ST_MONTH_SST

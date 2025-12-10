@@ -482,6 +482,156 @@ class CBottle3d:
         guidance_pixels: torch.Tensor | None = None,
         guidance_scale: float = 0.03,
         bf16=True,
+    ):
+        """
+        Args:
+
+            guidance_pixels: Either the pixel index of ``self.input_grid``` where the
+                TCs are desired. 0<= guidance_pixels < 12 * nside ^2. Or the enitre HPX
+                tensor already set. If None, no guidance used.
+            guidance_scale: float = 0.03,
+
+        """
+        if batch["target"].device != self.device:
+            batch = self._move_to_device(batch)
+        images, labels, condition = batch["target"], batch["labels"], batch["condition"]
+        second_of_day = batch["second_of_day"].float()
+        day_of_year = batch["day_of_year"].float()
+        batch_size = second_of_day.shape[0]
+
+        label_ind = labels.nonzero()[:, 1]
+        mask = torch.stack([self.icon_mask, self.era5_mask]).to(self.device)[
+            label_ind
+        ]  # n, c
+        mask = mask[:, :, None, None]
+
+        with torch.no_grad():
+            if seed is None:
+                rnd = torch
+            else:
+                rnd = StackedRandomGenerator(self.device, seeds=[seed] * batch_size)
+
+            latents = rnd.randn(
+                (
+                    batch_size,
+                    self.net.img_channels,
+                    self.time_length,
+                    self.net.domain.numel(),
+                ),
+                device=self.device,
+            )
+
+            if self.channels_last:
+                latents = latents.to(memory_format=torch.channels_last)
+                condition = condition.to(memory_format=torch.channels_last)
+                if images.dim() == 4:
+                    images = images.to(memory_format=torch.channels_last)
+
+            if start_from_noisy_image:
+                xT = latents * self.sigma_max + images
+            else:
+                xT = latents * self.sigma_max
+
+            any_nan = not (mask.all())
+
+            # ICON fills NaNs
+            labels_when_nan = torch.zeros_like(labels)
+            labels_when_nan[:, 0] = 1
+
+            guidance_data = guidance_pixels
+            if guidance_pixels is not None and guidance_pixels.ndim == 1:
+                guidance_data = torch.full(
+                    (batch_size, 1, 1, *self.classifier_grid.shape),
+                    torch.nan,
+                    device=self.device,
+                )
+                guidance_data[:, :, :, guidance_pixels] = 1
+                if self.channels_last:
+                    guidance_data = guidance_data.to(memory_format=torch.channels_last)
+
+            def D(x_hat, t_hat):
+                if guidance_data is not None:
+                    x_hat.requires_grad_(True)
+
+                out = self.net(
+                    x_hat.where(mask, 0),
+                    t_hat,
+                    class_labels=labels,
+                    condition=condition,
+                    second_of_day=second_of_day,
+                    day_of_year=day_of_year,
+                )
+
+                if any_nan:
+                    d2 = self.net(
+                        x_hat,
+                        t_hat,
+                        class_labels=labels_when_nan,
+                        condition=condition,
+                        second_of_day=second_of_day,
+                        day_of_year=day_of_year,
+                    ).out
+                else:
+                    d2 = 0.0
+                d = out.out.where(mask, d2)
+                if guidance_data is not None and guidance_scale > 0:
+                    if self.separate_classifier is not None:
+                        out.logits = self.separate_classifier(
+                            x_hat,
+                            t_hat,
+                            class_labels=labels,
+                            condition=condition,
+                            second_of_day=second_of_day,
+                            day_of_year=day_of_year,
+                        ).logits
+                    elif out.logits is None:
+                        raise ValueError(
+                            "Model did not produce `logits`. Are you sure this model was trained with guidance?"
+                        )
+                    else:
+                        # use the logits from the main model
+                        pass
+                    d_guide = cbottle.denoiser_factories.get_guidance(
+                        guidance_data, out.logits, x_hat, d, t_hat
+                    )
+                    d = d + guidance_scale * d_guide
+                    if self.channels_last:
+                        d = d.to(memory_format=torch.channels_last)
+
+                return d
+
+            if guidance_data is not None:
+                D = torch.enable_grad(D)
+
+            D.round_sigma = self.net.round_sigma
+            D.sigma_max = self.net.sigma_max
+            D.sigma_min = self.net.sigma_min
+
+            with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
+                out = edm_sampler_from_sigma(
+                    D,
+                    xT,
+                    randn_like=torch.randn_like,
+                    sigma_min=self.sigma_min,
+                    sigma_max=int(
+                        self.sigma_max
+                    ),  # Convert to int for type compatibility
+                    num_steps=self.num_steps,
+                    time_stepper=self.time_stepper,
+                )
+
+            out = self._post_process(out)
+
+            return out, self.coords
+
+    def _sample_with_latents(
+        self,
+        batch,
+        seed: int | None = None,
+        start_from_noisy_image: bool = False,
+        guidance_pixels: torch.Tensor | None = None,
+        guidance_scale: float = 0.03,
+        bf16=True,
         pre_generated_latents: torch.Tensor | None = None,
     ):
         """
@@ -1133,15 +1283,34 @@ def load(model: str, root="", **kwargs) -> CBottle3d:
             **kwargs,
         )
 
-    elif model == "cbottle-3d-moe-aimip":
-        checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(  # v1
-            # checkpoints = "training-state-000512000.checkpoint,training-state-002176000.checkpoint,training-state-009984000.checkpoint".split( # v2
-            # checkpoints = "training-state-000640000.checkpoint,training-state-002048000.checkpoint,training-state-010112000.checkpoint".split( # v3
-            # checkpoints = "training-state-000640000.checkpoint,training-state-002176000.checkpoint,training-state-009728000.checkpoint".split( # v4 and v5
+    elif model == "cbottle-3d-moe-aimip-p1":
+        checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
             ","
         )
         rundir = "aimip_v3"
         paths = [os.path.join(root, rundir, c) for c in checkpoints]
         return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
 
+    elif model == "cbottle-3d-moe-aimip-p2":
+        checkpoints = "training-state-000512000.checkpoint,training-state-002176000.checkpoint,training-state-009984000.checkpoint".split(
+            ","
+        )
+        rundir = "aimip_v3"
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+
+    elif model == "cbottle-3d-moe-aimip-p3":
+        checkpoints = "training-state-000640000.checkpoint,training-state-002048000.checkpoint,training-state-010112000.checkpoint".split()
+        rundir = "aimip_v3"
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+
+    elif model == "cbottle-3d-moe-aimip-p4":
+        # use this model for p5 with correlation half life 0.001
+        checkpoints = "training-state-000640000.checkpoint,training-state-002176000.checkpoint,training-state-009728000.checkpoint".split(
+            ","
+        )
+        rundir = "aimip_v3"
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
     raise ValueError(model)
