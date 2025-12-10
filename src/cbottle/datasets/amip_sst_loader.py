@@ -12,14 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import datetime
 import os
 import shutil
 import sys
 import tempfile
 import urllib.parse
-from pathlib import Path
-
 import earth2grid
 import requests
 import torch
@@ -27,6 +26,8 @@ import xarray
 
 from cbottle.config import environment as config
 from cbottle.storage import get_storage_options
+from pathlib import Path
+
 
 AMIP_SST_FILENAME = (
     "tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc"
@@ -36,12 +37,18 @@ AMIP_SST_URL = (
     f"PCMDI/PCMDI-AMIP-1-1-9/ocean/mon/tosbcs/gn/v20230512/{AMIP_SST_FILENAME}"
 )
 
+AIMIP_SST_FILENAME = "ERA5-0.25deg-monthly-mean-forcing-1978-2024.nc"
+AIMIP_SST_URL = (
+    f"https://zenodo.org/records/17065758/files/{AIMIP_SST_FILENAME}?download=1"
+)
+
 
 def _download_sst(output_path: Path):
     """Download the AMIP SST data from NGC
 
     This is much faster than the THREDDS server above
     """
+
     print(f"Downloading SST data to {output_path} ...", file=sys.stderr)
 
     url = "https://api.ngc.nvidia.com/v2/models/org/nvidia/team/earth-2/cbottle/1.2/files?redirect=true&path=amip_midmonth_sst.nc"
@@ -54,6 +61,18 @@ def _download_sst(output_path: Path):
             file.write(response.content)
             shutil.move(tmp_out, output_path)
     print("Successfully downloaded SST data", file=sys.stderr)
+
+
+def _download_aimip_sst(output_path: Path):
+    print(f"Downloading AIMIP SST data to {output_path} ...", file=sys.stderr)
+    ds = xarray.open_dataset(AIMIP_SST_URL)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out = tempfile.mktemp(
+        dir=output_path.parent.as_posix(), prefix=output_path.name
+    )
+    ds.to_netcdf(tmp_out)  # Save to netCDF
+    shutil.move(tmp_out, output_path)
+    print("Successfully downloaded AIMIP SST data", file=sys.stderr)
 
 
 def _is_file(path: str) -> str:
@@ -131,3 +150,51 @@ class AmipSSTLoader:
 
     def regrid(self, arr):
         return self._regridder(arr)
+
+
+class AImip_SSTLoader(AmipSSTLoader):
+    """AIMIP SST Forcing dataset"""
+
+    path = config.AIMIP_1ST_MONTH_SST
+
+    @classmethod
+    def ensure_downloaded(cls):
+        path = Path(cls.path)
+
+        if path.exists():
+            print(f"SST data already exists at {path}", file=sys.stderr)
+            return
+
+        if _is_file(cls.path):
+            _download_aimip_sst(Path(cls.path))
+
+    def __init__(self, target_grid=None):
+        self.ensure_downloaded()
+
+        self.ds = xarray.open_dataset(
+            self.path,
+            engine="h5netcdf",
+            storage_options=get_storage_options(config.AIMIP_1ST_MONTH_SST_PROFILE),
+        ).load()
+
+        self.times = self.ds.indexes["time"]
+
+        if target_grid is not None:
+            lon_center = self.ds.longitude.values
+            # need to workaround bug where earth2grid fails to interpolate in circular manner
+            # if lon[0] > 0
+            # hack: rotate both src and target grids by the same amount so that src_lon[0] == 0
+            # See https://github.com/NVlabs/earth2grid/issues/21
+            src_lon = lon_center - lon_center[0]
+            target_lon = (target_grid.lon - lon_center[0]) % 360
+
+            grid = earth2grid.latlon.LatLonGrid(self.ds.latitude.values, src_lon)
+            self._regridder = grid.get_bilinear_regridder_to(
+                target_grid.lat, lon=target_lon
+            )
+
+    def interp(self, time: datetime.datetime):
+        """Linearly interpolate between the available points"""
+        return torch.from_numpy(
+            self.ds["sea_surface_temperature"].interp(time=time, method="linear").values
+        )

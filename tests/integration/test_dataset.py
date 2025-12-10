@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from cbottle.datasets.amip_sst_loader import AmipSSTLoader
+from cbottle.datasets.amip_sst_loader import AmipSSTLoader, AImip_SSTLoader
 from cbottle.datasets import ibtracs
 from cbottle.datasets import dataset_3d
 from cbottle.storage import StorageConfigError
@@ -32,6 +32,25 @@ def test_AmipSSTDataset():
 
     out = ds.interp(datetime.datetime(2000, 1, 1))
     assert out.shape == (180, 360)
+
+
+def test_AImipSSTDataset():
+    try:
+        ds = AImip_SSTLoader()
+    except (FileNotFoundError, PermissionError):
+        pytest.skip()
+
+    out = ds.interp(datetime.datetime(2000, 1, 1))
+    assert out.shape == (721, 1440)
+
+
+def test_dataset_era5_aimip():
+    try:
+        ds = dataset_3d.get_dataset(split="train", dataset="era5-aimip")
+    except StorageConfigError:
+        pytest.skip()
+    # Don't fetch data to keep tests fast
+    assert ds is not None
 
 
 def test_dataset_v6():

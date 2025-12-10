@@ -104,6 +104,7 @@ class TrainingLoop(loop.TrainingLoopBase):
     variables: str = "default"
     icon_chunk_size: int = 8
     era5_chunk_size: int = 48
+    aimip_train_test_split: bool = False
 
     # network
     network: SongUnetConfig = SongUnetConfig()
@@ -259,7 +260,10 @@ class TrainingLoop(loop.TrainingLoopBase):
 
         # Determine which dataset to use based on rank
         if self.with_era5 and rank < n_era5:
-            dataset = "era5"
+            if self.aimip_train_test_split:
+                dataset = "era5-aimip"
+            else:
+                dataset = "era5"
             effective_rank = rank
             effective_world_size = n_era5
             chunk_size = self.era5_chunk_size
@@ -709,6 +713,7 @@ class CLI:
             batch_gpu=2,
             lr_rampup_img=10_000,
             with_era5=False,
+            aimip_train_test_split=False,
             ibtracs_input=False,
             ibtracs_loss_weight=0.1,
         )
