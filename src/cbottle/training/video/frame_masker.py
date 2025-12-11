@@ -54,9 +54,12 @@ class FrameMasker:
         self.config = masking_config
         self.keep_frames = keep_frames
 
-    def __call__(self, batch):
+    def __call__(self, batch, condition_to_insert=None):
         batch = {**batch}
-        target = batch["target"]
+        if condition_to_insert is None:
+            target = batch["target"]
+        else:
+            target = condition_to_insert
         has_batch_dim = target.ndim == 4
 
         if not has_batch_dim:

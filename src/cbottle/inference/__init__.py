@@ -30,18 +30,34 @@ import logging
 from scipy.signal.windows import kaiser_bessel_derived
 
 import cbottle.denoiser_factories
-from . import checkpointing, patchify
-from .diffusion_samplers import (
+from cbottle import checkpointing, patchify
+from cbottle.diffusion_samplers import (
     edm_sampler,
     edm_sampler_from_sigma,
     edm_sampler_steps,
     few_step_sampler,
     StackedRandomGenerator,
 )
-from .datasets import base
+from cbottle.datasets import base
 
-from .datasets.dataset_2d import HealpixDatasetV5, LABELS
+from cbottle.datasets.dataset_2d import HealpixDatasetV5, LABELS
 from cbottle.config import environment
+from ._video_autoregression import (
+    VideoAutoregression,
+    VideoAutoregressionState,
+    AutoregressionDiagnostics,
+)
+
+__all__ = [
+    "CBottle3d",
+    "Coords",
+    "VideoAutoregression",
+    "VideoAutoregressionState",
+    "AutoregressionDiagnostics",
+    "SuperResolutionModel",
+    "DistilledSuperResolutionModel",
+    "MixtureOfExpertsDenoiser",
+]
 
 
 @dataclasses.dataclass
@@ -208,7 +224,9 @@ class CBottle3d:
         device = next(self.net.parameters()).device
         return device
 
-    def infill(self, batch: dict, bf16: bool = True) -> tuple[torch.Tensor, Coords]:
+    def infill(
+        self, batch: dict, bf16: bool = True, return_untransformed: bool = False
+    ) -> tuple[torch.Tensor, Coords]:
         """
         Perform infilling on batch with NaN values.
         Args:
@@ -292,9 +310,13 @@ class CBottle3d:
                 )
 
         # Post-process the output
-        out = self._post_process(out)
-
-        return out, Coords(self.batch_info, self.output_grid)
+        if return_untransformed:
+            raw = out
+            processed = self._post_process(out)
+            return processed, Coords(self.batch_info, self.output_grid), raw
+        else:
+            out = self._post_process(out)
+            return out, Coords(self.batch_info, self.output_grid)
 
     def _encode(self, batch: dict, bf16: bool = True) -> dict:
         batch = self._move_to_device(batch)
@@ -420,14 +442,23 @@ class CBottle3d:
         return self.translate(batch, "icon")
 
     def translate(
-        self, batch: dict, dataset: Literal["icon", "era5"]
+        self,
+        batch: dict,
+        dataset: Literal["icon", "era5"],
+        bf16: bool = True,
+        return_untransformed: bool = False,
     ) -> tuple[torch.Tensor, Coords]:
         # Move all tensors to the correct device
         with torch.no_grad():
-            encoded = self._encode(batch)
-            out = self._decode(encoded, dataset)["target"]
-        out = self._post_process(out)
-        return out, Coords(self.batch_info, self.output_grid)
+            encoded = self._encode(batch, bf16=bf16)
+            out = self._decode(encoded, dataset, bf16=bf16)["target"]
+        if return_untransformed:
+            raw = out
+            processed = self._post_process(out)
+            return processed, Coords(self.batch_info, self.output_grid), raw
+        else:
+            out = self._post_process(out)
+            return out, Coords(self.batch_info, self.output_grid)
 
     def denormalize(self, batch: dict) -> tuple[torch.Tensor, Coords]:
         # Move all tensors to the correct device
@@ -436,7 +467,7 @@ class CBottle3d:
         out = out.to(self.device)
         return out, Coords(self.batch_info, self.output_grid)
 
-    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """
         Unpost-process the output by normalizing.
         """
@@ -685,7 +716,7 @@ class CBottle3d:
             batch,
             guidance_pixels=indices_where_tc,
         )
-        out = self.normalize(out)
+        out = self._normalize(out)
         out = self._reorder(out)
 
         batch["target"] = out
