@@ -87,7 +87,6 @@ python scripts/inference_coarse_video.py \
     --sample.frame_selection_strategy first_frame \
     --sample.bf16 \
     --sample.mode translate \
-    --sample.autoregression_enabled \
     --sample.autoregression_duration 60  \
     <CHECKPOINT> \
     <OUTPUT>
