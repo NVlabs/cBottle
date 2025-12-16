@@ -536,6 +536,7 @@ class CBottle3d:
             guidance_scale=guidance_scale,
             bf16=bf16,
             pre_generated_latents=None,
+            return_untransformed=return_untransformed,
         )
 
     def _sample_with_latents(
@@ -547,6 +548,7 @@ class CBottle3d:
         guidance_scale: float = 0.03,
         bf16=True,
         pre_generated_latents: torch.Tensor | None = None,
+        return_untransformed: bool = False,
     ):
         """
         Args:
