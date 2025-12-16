@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 from functools import partial
 from enum import auto, Enum
-
+import datetime
 import cbottle.distributed as dist
 from cbottle.dataclass_parser import Help, a, parse_args
 import cbottle.inference
@@ -153,6 +153,7 @@ def write_step_frames(
     diags: AutoregressionDiagnostics,
     autoregression_start_timestamp: float,
     target_end_timestamp: float,
+    time_step: datetime.timedelta,
     is_initialization: bool,
 ) -> None:
     """
@@ -164,7 +165,7 @@ def write_step_frames(
         Open NetCDF writer used to append new frames to disk.
     diags : AutoregressionDiagnostics
         Minimal diagnostic bundle from the model, containing raw frames,
-        timestamps, coordinate metadata, and conditioning information.
+        timestamp, coordinate metadata, and conditioning information.
     autoregression_start_timestamp : float
         Absolute timestamp (seconds since epoch) marking the start of the
         entire autoregression sequence. Used to compute lead-time hours.
@@ -177,7 +178,6 @@ def write_step_frames(
         newly generated frames (source=1) are written.
     """
     frames = diags.frames
-    timestamps = diags.timestamps
     device = frames.device
 
     time_length = frames.shape[2]
@@ -192,6 +192,13 @@ def write_step_frames(
         frames_to_write_indices = list(range(time_length))
     else:
         frames_to_write_indices = [i for i, src in enumerate(frame_source) if src == 1]
+
+    frame_offsets = torch.tensor(
+        [i * time_step.total_seconds() for i in range(time_length)],
+        device=device,
+        dtype=diags.timestamp.dtype,
+    )
+    timestamps = diags.timestamp.unsqueeze(-1) + frame_offsets.unsqueeze(0)
 
     # Lead times in hours relative to autoregression start.
     lead_time_hours = ((timestamps - autoregression_start_timestamp) / 3600.0).to(
@@ -242,7 +249,7 @@ class SamplerArgs:
         FrameSelectionStrategy, Help("Conditioning strategy for initialization")
     ] = FrameSelectionStrategy.unconditional
     seed: int | None = None
-    autoregression_duration: a[int, Help("Number of days to cover")] = 1
+    autoregression_duration: a[int, Help("Number of days to cover")] = 3
     autoregression_num_conditioning_frames: a[
         int,
         Help(
@@ -404,6 +411,7 @@ def save_inferences(
             diags,
             autoregression_start_timestamp,
             target_end_timestamp,
+            autoregression_engine.time_step,
             is_initialization=True,
         )
 
@@ -423,6 +431,7 @@ def save_inferences(
                 diags,
                 autoregression_start_timestamp,
                 target_end_timestamp,
+                autoregression_engine.time_step,
                 is_initialization=False,
             )
 
@@ -450,13 +459,11 @@ def main():
 
     dist.init()
 
-    sigma_max = args.sample.sigma_max
-    sigma_min = args.sample.sigma_min
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
     if torch.cuda.is_available():
-        device = torch.device(f"cuda:{rank}")
+        device = torch.device("cuda")
     else:
         device = torch.device("cpu")
 
@@ -540,20 +547,6 @@ def main():
 
     if rank == 0:
         logger.info(
-            "\nInference Configuration:"
-            "\n------------------------"
-            f"\nOutput path:  {args.output_path}"
-            f"\nDataset:      {args.dataset}"
-            f"\nSampler mode: {args.sample.mode}"
-            "\nSampling settings:"
-            f"\n  • sigma_max:   {sigma_max}"
-            f"\n  • sigma_min:   {sigma_min}"
-            f"\n  • sampler:     {args.sample.sampler}"
-            f"\n  • min_samples: {args.sample.min_samples}"
-            "\nVideo settings:"
-            f"\n  • time_length: {time_length}"
-            f"\n  • frame_step:  {time_step} (hours)"
-            f"\n  • masking:     {args.sample.initialization_conditioning}"
             f"\n  • number of autoregression tasks: {len(autoregression_tasks)}"
             f"\n  • number of autoregression steps per task: "
             f"{autoregression_tasks[0][1] + 1}"

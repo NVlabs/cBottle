@@ -42,11 +42,13 @@ class AutoregressionDiagnostics:
     Minimal data bundle returned from a single autoregression step (batch_size=1).
 
     This structure intentionally contains only raw model outputs and metadata
-    required for downstream writing. It does not implement any behavior.
+    required for downstream writing.
     """
 
     frames: torch.Tensor  # (1, C, T, npix) denormalized
-    timestamps: torch.Tensor  # (1, T) absolute timestamps in seconds
+    timestamp: (
+        torch.Tensor
+    )  # (1, ) absolute start timestamp in seconds for the current autoregression step
     conditioning_indices: list[int]  # Indices of conditioning frames
     coords: "Coords"
 
@@ -150,12 +152,11 @@ class VideoAutoregression:
             Diagnostics for the initial window.
         """
         frames = frames or {}
-        if frames is not None:
-            for idx in frames.keys():
-                if idx < 0 or idx >= self.time_length:
-                    raise ValueError(
-                        f"Frame index {idx} out of range [0, {self.time_length})"
-                    )
+        for idx in frames.keys():
+            if idx < 0 or idx >= self.time_length:
+                raise ValueError(
+                    f"Frame index {idx} out of range [0, {self.time_length})"
+                )
 
         batch = self._load_batch_at_time(start_time)
         condition_to_insert, conditioning_indices = self._insert_conditioning_frames(
@@ -168,7 +169,6 @@ class VideoAutoregression:
             autoregression_start_time=start_time,
             conditioning_indices=conditioning_indices,
             condition_to_insert=condition_to_insert,
-            is_initialization=True,
         )
 
         return state, diags
@@ -228,7 +228,6 @@ class VideoAutoregression:
             autoregression_start_time=state.autoregression_start_time,
             conditioning_indices=conditioning_indices,
             condition_to_insert=condition_to_insert,
-            is_initialization=False,
         )
         return new_state, diags
 
@@ -282,15 +281,12 @@ class VideoAutoregression:
         start_time: pd.Timestamp,
         autoregression_start_time: pd.Timestamp,
         conditioning_indices: list[int],
-        is_initialization: bool,
         condition_to_insert: torch.Tensor | None,
     ) -> tuple[VideoAutoregressionState, AutoregressionDiagnostics]:
         """
         Generate frames for a single autoregression window and create both
         state and diagnostics.
         """
-        timestamps = self._compute_timestamps_from_batch(batch)
-
         batch = self._apply_frame_masking(
             batch, conditioning_indices, condition_to_insert
         )
@@ -300,7 +296,7 @@ class VideoAutoregression:
 
         diags = AutoregressionDiagnostics(
             frames=frames_processed,
-            timestamps=timestamps,
+            timestamp=batch["timestamp"],
             conditioning_indices=conditioning_indices,
             coords=coords,
         )
@@ -334,15 +330,6 @@ class VideoAutoregression:
             key: value.to(self.device) if isinstance(value, torch.Tensor) else value
             for key, value in batch.items()
         }
-
-    def _compute_timestamps_from_batch(self, batch: dict) -> torch.Tensor:
-        """Compute timestamps (B, T) for the current window from the batch."""
-        ts = batch["timestamp"]
-        frame_offsets = torch.tensor(
-            [i * self.time_step.total_seconds() for i in range(self.time_length)],
-            device=ts.device,
-        )
-        return ts.unsqueeze(-1) + frame_offsets.unsqueeze(0)
 
     def _apply_frame_masking(
         self,

@@ -168,10 +168,6 @@ def edm_sampler_from_sigma(
                 denoised = net(x_next, t_next).to(torch.float64)
                 d_prime = (x_next - denoised) / t_next
                 x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
-        print(
-            f"t_next: {t_next}, real sigma: {torch.std(x_next[torch.isfinite(x_next)])}"
-        )
-
     return x_next
 
 

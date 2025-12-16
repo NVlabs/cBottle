@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
 import torch
 import pandas as pd
 from unittest.mock import Mock
@@ -22,8 +21,7 @@ from cbottle.inference import VideoAutoregression
 from cbottle.datasets.base import BatchInfo, TimeUnit
 
 
-@pytest.fixture
-def model_and_dataset():
+def make_model_and_dataset():
     """Create a minimal mock model and dataset for autoregression tests."""
     batch_info = BatchInfo(
         channels=["a", "b", "c"],
@@ -35,7 +33,6 @@ def model_and_dataset():
 
     model = Mock()
     model.time_length = 4
-    # coords mock
     model.coords = Mock()
     model.coords.batch_info = batch_info
     model.coords.npix = npix
@@ -43,7 +40,6 @@ def model_and_dataset():
     model.net.parameters.return_value = iter([torch.nn.Parameter(torch.randn(1))])
 
     def mock_sample(batch, **kwargs):
-        # Mimic (frames_processed, coords, frames_raw)
         target = batch["target"]
         coords = Mock()
         coords.batch_info = batch_info
@@ -66,13 +62,11 @@ def model_and_dataset():
                 "condition": torch.zeros(1, 1, model.time_length, npix),
             }
 
-    dataset = FakeDataset()
-
-    return model, dataset
+    return model, FakeDataset()
 
 
-def test_video_autoregression_forward(model_and_dataset):
-    model, dataset = model_and_dataset
+def test_video_autoregression_forward():
+    model, dataset = make_model_and_dataset()
     batch_info = model.coords.batch_info
     nchannels = len(batch_info.channels)
     npix = model.coords.npix
@@ -110,9 +104,9 @@ def test_video_autoregression_forward(model_and_dataset):
     assert diags3.frames.shape == (1, nchannels, time_length, npix)
 
 
-def test_video_autoregression_backward(model_and_dataset):
+def test_video_autoregression_backward():
     """Backward autoregression should move the window back in time while keeping the start time fixed."""
-    model, dataset = model_and_dataset
+    model, dataset = make_model_and_dataset()
     batch_info = model.coords.batch_info
     nchannels = len(batch_info.channels)
     npix = model.coords.npix
@@ -142,9 +136,9 @@ def test_video_autoregression_backward(model_and_dataset):
     assert diags2.frames.shape == (1, nchannels, time_length, npix)
 
 
-def test_video_autoregression_with_conditioning(model_and_dataset):
+def test_video_autoregression_with_conditioning():
     """Initialization should honor the requested conditioning frame indices."""
-    model, dataset = model_and_dataset
+    model, dataset = make_model_and_dataset()
     batch_info = model.coords.batch_info
     nchannels = len(batch_info.channels)
     npix = model.coords.npix
