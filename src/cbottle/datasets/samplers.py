@@ -12,11 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
 import random
-
 import torch.utils.data
-
 import cbottle.distributed as dist
 
 
@@ -29,14 +26,49 @@ def subsample(dataset, min_samples):
     return sampler
 
 
-def distributed_split(tasks, drop_last=True):
+def distributed_split(tasks, drop_last: bool = True):
+    """
+    Split a list of tasks across distributed ranks.
+
+    Args:
+        tasks:
+            Sequence of tasks to split.
+        drop_last:
+            If True, drop the remainder so that each rank gets exactly
+            floor(len(tasks) / world_size) items.
+            If False, the first `len(tasks) % world_size` ranks will receive
+            one extra task.
+    Returns:
+        Tasks assigned to the calling rank.
+    A slice of `tasks` assigned to the calling rank.
+    """
     n = len(tasks)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    chunk = math.ceil(len(tasks) / world_size)
-    start = rank * chunk
-    stop = n if drop_last and (rank == world_size - 1) else start + chunk
-    return [t for i, t in enumerate(tasks) if start <= i < stop]
+
+    if world_size <= 1 or n == 0:
+        # Single-process or empty input: return all tasks on rank 0, empty elsewhere
+        return tasks if rank == 0 else tasks[:0]
+
+    base = n // world_size
+    rem = n % world_size
+
+    if drop_last:
+        # Drop the remainder so each rank gets exactly `base` items
+        total = base * world_size
+        tasks = tasks[:total]
+        start = rank * base
+        samples_per_rank = base
+    else:
+        # Distribute the remainder one per rank among the first `rem` ranks
+        if rank < rem:
+            samples_per_rank = base + 1
+            start = rank * samples_per_rank
+        else:
+            samples_per_rank = base
+            start = rem * (base + 1) + (rank - rem) * base
+
+    return tasks[start : start + samples_per_rank]
 
 
 class InfiniteSequentialSampler(torch.utils.data.Sampler):
