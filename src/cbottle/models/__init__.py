@@ -65,4 +65,5 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
         img_channels=config.out_channels,
         time_length=config.time_length,
         label_dim=config.label_dim,
+        sigma_data=config.sigma_data,
     )
