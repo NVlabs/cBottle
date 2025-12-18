@@ -36,6 +36,8 @@ class ModelConfigV1:
     # arguments for SongUnetHPX1024
     position_embed_channels: int = 20
     img_resolution: int = 128
+    # EDM Preconditioning
+    sigma_data: float = 1.0
 
     def dumps(self):
         return json.dumps(dataclasses.asdict(self))

@@ -99,4 +99,5 @@ def get_model(
         img_channels=config.out_channels,
         time_length=config.time_length,
         label_dim=config.label_dim,
+        sigma_data=config.sigma_data,
     )
