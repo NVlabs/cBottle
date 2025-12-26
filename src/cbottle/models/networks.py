@@ -41,6 +41,7 @@ from torch.nn.functional import silu
 from cbottle.domain import Domain, HealPixDomain, PatchedHealpixDomain
 from cbottle.models.embedding import (
     CalendarEmbedding,
+    CalendarEmbeddingOnlyDay,
     FourierEmbedding,
     PositionalEmbedding,
 )
@@ -1065,6 +1066,7 @@ class SongUNet(torch.nn.Module):
         add_spatial_embedding: bool = False,
         calendar_embed_channels: int = 0,  # embedding dimension for year fraction and second fraction
         calendar_include_legacy_bug: bool = False,
+        calendar_only_day: bool = False,  # drop second_of_day from calendar embedding in case of daily resolution data
         decoder_start_with_temporal_attention: bool = False,
         upsample_temporal_attention: bool = False,
         channels_per_head: int = -1,  # uses all heads if -1, otherwise uses this many per head
@@ -1117,11 +1119,18 @@ class SongUNet(torch.nn.Module):
 
         if calendar_embed_channels:
             # needs healpix
-            self.embed_calendar = CalendarEmbedding(
-                torch.from_numpy(self.grid.lon).float(),
-                calendar_embed_channels,
-                include_legacy_bug=calendar_include_legacy_bug,
-            )
+            if not calendar_only_day:
+                self.embed_calendar = CalendarEmbedding(
+                    torch.from_numpy(self.grid.lon).float(),
+                    calendar_embed_channels,
+                    include_legacy_bug=calendar_include_legacy_bug,
+                )
+            else:
+                self.embed_calendar = CalendarEmbeddingOnlyDay(
+                    torch.from_numpy(self.grid.lon).float(),
+                    calendar_embed_channels,
+                    include_legacy_bug=calendar_include_legacy_bug,
+                )
             in_channels += self.embed_calendar.out_channels
         else:
             self.embed_calendar = None

@@ -24,6 +24,7 @@ import cbottle.models.networks
 from cbottle import domain
 from cbottle.models.networks import (
     CalendarEmbedding,
+    CalendarEmbeddingOnlyDay,
     Conv2dHealpix,
     HealPixDomain,
     NoCopyNCHW2NHWC,
@@ -193,7 +194,23 @@ def test_CalendarEmbedding():
     assert out.shape == (n, 4 * g, t, npix)
 
 
-def test_SongUnetCalendarEmbeddings():
+def test_CalendarEmbeddingOnlyDay():
+    g = 8
+    npix = 32
+    n = 4
+    t = 2
+
+    lon = torch.arange(npix)
+    calendar = CalendarEmbeddingOnlyDay(lon, g)
+    doy = torch.ones([n, t])
+    second = torch.ones([n, t])
+
+    out = calendar(doy, second)
+    assert out.shape == (n, 2 * g, t, npix)
+
+
+@pytest.mark.parametrize("calendar_only_day", [False, True])
+def test_SongUnetCalendarEmbeddings(calendar_only_day: bool):
     domain = HealPixDomain(Grid(level=4, pixel_order=HEALPIX_PAD_XY))
     net = SongUNet(
         add_spatial_embedding=True,
@@ -202,6 +219,7 @@ def test_SongUnetCalendarEmbeddings():
         domain=domain,
         model_channels=4,
         calendar_embed_channels=1,
+        calendar_only_day=calendar_only_day,
         mixing_type="healpix",
         padding_backend=PaddingBackends.cuda,
     )
@@ -219,6 +237,23 @@ def test_SongUnetCalendarEmbeddings():
     out = net(
         img, noise_labels, class_labels=None, day_of_year=doy, second_of_day=second
     )
+
+    cal_embed = net.embed_calendar(doy, second)
+    if calendar_only_day:
+        assert cal_embed.shape == (
+            n,
+            2 * net.calendar_embed_channels,
+            t,
+            net.domain.numel(),
+        )
+    else:
+        assert cal_embed.shape == (
+            n,
+            4 * net.calendar_embed_channels,
+            t,
+            net.domain.numel(),
+        )
+
     assert out.out.shape == (n, 3, t, net.domain.numel())
 
 
