@@ -30,18 +30,34 @@ import logging
 from scipy.signal.windows import kaiser_bessel_derived
 
 import cbottle.denoiser_factories
-from . import checkpointing, patchify
-from .diffusion_samplers import (
+from cbottle import checkpointing, patchify
+from cbottle.diffusion_samplers import (
     edm_sampler,
     edm_sampler_from_sigma,
     edm_sampler_steps,
     few_step_sampler,
     StackedRandomGenerator,
 )
-from .datasets import base
+from cbottle.datasets import base
 
-from .datasets.dataset_2d import HealpixDatasetV5, LABELS
+from cbottle.datasets.dataset_2d import HealpixDatasetV5, LABELS
 from cbottle.config import environment
+from ._video_autoregression import (
+    VideoAutoregression,
+    VideoAutoregressionState,
+    AutoregressionDiagnostics,
+)
+
+__all__ = [
+    "CBottle3d",
+    "Coords",
+    "VideoAutoregression",
+    "VideoAutoregressionState",
+    "AutoregressionDiagnostics",
+    "SuperResolutionModel",
+    "DistilledSuperResolutionModel",
+    "MixtureOfExpertsDenoiser",
+]
 
 
 @dataclasses.dataclass
@@ -83,6 +99,8 @@ class CBottle3d:
         num_steps: int = 18,
         time_stepper: Literal["heun", "euler"] = "heun",
         channels_last: bool = True,
+        torch_compile: bool = False,
+        device: str | None = None,
     ):
         """
         Initialize the CBottle3d model.
@@ -95,6 +113,8 @@ class CBottle3d:
             num_steps: Number of sampling steps
             time_stepper: Which time stepper to use (heun, euler)
             channels_last: Whether to convert input and model to channels_last
+            torch_compile: Whether to compile the model with torch.compile
+            device: Device to move models to
         """
         self.net = net
         self.separate_classifier = separate_classifier
@@ -103,11 +123,29 @@ class CBottle3d:
         self.num_steps = num_steps
         self.time_stepper = time_stepper
         self.channels_last = channels_last
+        self._move_models_to_device(device)
         self._convert_model_NHWC()
+        if torch_compile:
+            self.torch_compile()
+
+    def torch_compile(self):
+        if isinstance(self.net, MixtureOfExpertsDenoiser):
+            for i, expert in enumerate(self.net.experts):
+                self.net.experts[i] = torch.compile(expert, fullgraph=True)
+        else:
+            self.net = torch.compile(self.net, fullgraph=True)
 
     def _convert_model_NHWC(self):
         if self.channels_last:
             self.net = self.net.to(memory_format=torch.channels_last)
+
+    def _move_models_to_device(self, device: str | None):
+        if device is None:
+            return
+
+        self.net = self.net.to(device)
+        if self.separate_classifier is not None:
+            self.separate_classifier = self.separate_classifier.to(device)
 
     @classmethod
     def from_pretrained(
@@ -186,7 +224,9 @@ class CBottle3d:
         device = next(self.net.parameters()).device
         return device
 
-    def infill(self, batch: dict) -> tuple[torch.Tensor, Coords]:
+    def infill(
+        self, batch: dict, bf16: bool = True, return_untransformed: bool = False
+    ) -> tuple[torch.Tensor, Coords]:
         """
         Perform infilling on batch with NaN values.
         Args:
@@ -259,21 +299,26 @@ class CBottle3d:
 
         # Run infilling sampling
         with torch.no_grad():
-            out = edm_sampler_from_sigma(
-                D,
-                latents,
-                randn_like=torch.randn_like,
-                sigma_max=self.sigma_max,
-                sigma_min=self.sigma_min,
-                num_steps=self.num_steps,
-            )
+            with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
+                out = edm_sampler_from_sigma(
+                    D,
+                    latents,
+                    randn_like=torch.randn_like,
+                    sigma_max=self.sigma_max,
+                    sigma_min=self.sigma_min,
+                    num_steps=self.num_steps,
+                )
 
         # Post-process the output
-        out = self._post_process(out)
+        if return_untransformed:
+            raw = out
+            processed = self._post_process(out)
+            return processed, Coords(self.batch_info, self.output_grid), raw
+        else:
+            out = self._post_process(out)
+            return out, Coords(self.batch_info, self.output_grid)
 
-        return out, Coords(self.batch_info, self.output_grid)
-
-    def _encode(self, batch: dict) -> dict:
+    def _encode(self, batch: dict, bf16: bool = True) -> dict:
         batch = self._move_to_device(batch)
 
         images, labels, condition = batch["target"], batch["labels"], batch["condition"]
@@ -302,17 +347,17 @@ class CBottle3d:
         D.sigma_min = self.sigma_min
         D.sigma_max = self.sigma_max
         D.round_sigma = lambda x: x
-
-        encoded = edm_sampler_from_sigma(
-            D,
-            y0,
-            sigma_max=self.sigma_max,
-            sigma_min=self.sigma_min,
-            num_steps=self.num_steps,
-            randn_like=torch.randn_like,
-            reverse=True,
-            S_noise=0,
-        )
+        with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
+            encoded = edm_sampler_from_sigma(
+                D,
+                y0,
+                sigma_max=self.sigma_max,
+                sigma_min=self.sigma_min,
+                num_steps=self.num_steps,
+                randn_like=torch.randn_like,
+                reverse=True,
+                S_noise=0,
+            )
 
         # add noise for missing channels
         encoded = encoded.where(mask, torch.randn_like(encoded) * self.sigma_max)
@@ -326,6 +371,7 @@ class CBottle3d:
         batch: dict,
         dataset: Literal["era5", "icon"],
         dataset_when_nan: str = "icon",
+        bf16: bool = True,
     ) -> dict:
         batch = self._move_to_device(batch)
 
@@ -371,15 +417,16 @@ class CBottle3d:
             raise ValueError(dataset)
 
         output = batch.copy()
-        output["target"] = edm_sampler_from_sigma(
-            denoiser,
-            images,
-            sigma_max=self.sigma_max,
-            sigma_min=self.sigma_min,
-            randn_like=torch.randn_like,
-            num_steps=self.num_steps,
-            S_noise=0,
-        )
+        with torch.autocast("cuda", enabled=bf16, dtype=torch.bfloat16):
+            output["target"] = edm_sampler_from_sigma(
+                denoiser,
+                images,
+                sigma_max=self.sigma_max,
+                sigma_min=self.sigma_min,
+                randn_like=torch.randn_like,
+                num_steps=self.num_steps,
+                S_noise=0,
+            )
         return output
 
     def to_icon(self, batch: dict) -> tuple[torch.Tensor, Coords]:
@@ -395,14 +442,23 @@ class CBottle3d:
         return self.translate(batch, "icon")
 
     def translate(
-        self, batch: dict, dataset: Literal["icon", "era5"]
+        self,
+        batch: dict,
+        dataset: Literal["icon", "era5"],
+        bf16: bool = True,
+        return_untransformed: bool = False,
     ) -> tuple[torch.Tensor, Coords]:
         # Move all tensors to the correct device
-        encoded = self._encode(batch)
         with torch.no_grad():
-            out = self._decode(encoded, dataset)["target"]
-        out = self._post_process(out)
-        return out, Coords(self.batch_info, self.output_grid)
+            encoded = self._encode(batch, bf16=bf16)
+            out = self._decode(encoded, dataset, bf16=bf16)["target"]
+        if return_untransformed:
+            raw = out
+            processed = self._post_process(out)
+            return processed, Coords(self.batch_info, self.output_grid), raw
+        else:
+            out = self._post_process(out)
+            return out, Coords(self.batch_info, self.output_grid)
 
     def denormalize(self, batch: dict) -> tuple[torch.Tensor, Coords]:
         # Move all tensors to the correct device
@@ -460,6 +516,39 @@ class CBottle3d:
         guidance_pixels: torch.Tensor | None = None,
         guidance_scale: float = 0.03,
         bf16=True,
+        return_untransformed: bool = False,
+    ):
+        """
+        Args:
+
+            guidance_pixels: Either the pixel index of ``self.input_grid``` where the
+                TCs are desired. 0<= guidance_pixels < 12 * nside ^2. Or the enitre HPX
+                tensor already set. If None, no guidance used.
+            guidance_scale: float = 0.03
+            return_untransformed: If True, also returns the un-post-processed data (normalized and model specific grid)
+
+        """
+        return self._sample_with_latents(
+            batch=batch,
+            seed=seed,
+            start_from_noisy_image=start_from_noisy_image,
+            guidance_pixels=guidance_pixels,
+            guidance_scale=guidance_scale,
+            bf16=bf16,
+            pre_generated_latents=None,
+            return_untransformed=return_untransformed,
+        )
+
+    def _sample_with_latents(
+        self,
+        batch,
+        seed: int | None = None,
+        start_from_noisy_image: bool = False,
+        guidance_pixels: torch.Tensor | None = None,
+        guidance_scale: float = 0.03,
+        bf16=True,
+        pre_generated_latents: torch.Tensor | None = None,
+        return_untransformed: bool = False,
     ):
         """
         Args:
@@ -470,6 +559,8 @@ class CBottle3d:
             guidance_scale: float = 0.03,
 
         """
+        if batch["target"].device != self.device:
+            batch = self._move_to_device(batch)
         images, labels, condition = batch["target"], batch["labels"], batch["condition"]
         second_of_day = batch["second_of_day"].float()
         day_of_year = batch["day_of_year"].float()
@@ -482,20 +573,29 @@ class CBottle3d:
         mask = mask[:, :, None, None]
 
         with torch.no_grad():
-            if seed is None:
-                rnd = torch
-            else:
-                rnd = StackedRandomGenerator(self.device, seeds=[seed] * batch_size)
+            device = condition.device
 
-            latents = rnd.randn(
-                (
-                    batch_size,
-                    self.net.img_channels,
-                    self.time_length,
-                    self.net.domain.numel(),
-                ),
-                device=self.device,
-            )
+            if pre_generated_latents is not None:
+                # Use pre-generated latents (e.g., from CorrelatedLatentGenerator)
+                latents = pre_generated_latents
+                if latents.device != device:
+                    latents = latents.to(device)
+            else:
+                # Generate new latents
+                if seed is None:
+                    rnd = torch
+                else:
+                    rnd = StackedRandomGenerator(device, seeds=[seed] * batch_size)
+
+                latents = rnd.randn(
+                    (
+                        batch_size,
+                        self.net.img_channels,
+                        self.time_length,
+                        self.net.domain.numel(),
+                    ),
+                    device=self.device,
+                )
 
             if self.channels_last:
                 latents = latents.to(memory_format=torch.channels_last)
@@ -549,7 +649,6 @@ class CBottle3d:
                     ).out
                 else:
                     d2 = 0.0
-
                 d = out.out.where(mask, d2)
                 if guidance_data is not None and guidance_scale > 0:
                     if self.separate_classifier is not None:
@@ -568,11 +667,12 @@ class CBottle3d:
                     else:
                         # use the logits from the main model
                         pass
-
                     d_guide = cbottle.denoiser_factories.get_guidance(
                         guidance_data, out.logits, x_hat, d, t_hat
                     )
                     d = d + guidance_scale * d_guide
+                    if self.channels_last:
+                        d = d.to(memory_format=torch.channels_last)
 
                 return d
 
@@ -596,9 +696,13 @@ class CBottle3d:
                     time_stepper=self.time_stepper,
                 )
 
-            out = self._post_process(out)
-
-            return out, self.coords
+            if return_untransformed:
+                raw = out
+                processed = self._post_process(out)
+                return processed, self.coords, raw
+            else:
+                out = self._post_process(out)
+                return out, self.coords
 
     def get_guidance_pixels(self, lons, lats) -> torch.Tensor:
         return self.classifier_grid.ang2pix(
@@ -640,6 +744,7 @@ class SuperResolutionModel(torch.nn.Module):
         overlap_size: int = 32,
         num_steps: int = 18,
         sigma_max: int = 800,
+        torch_compile: bool = False,
         device: str = "cuda",
     ):
         """
@@ -653,6 +758,7 @@ class SuperResolutionModel(torch.nn.Module):
             overlap_size: Overlapping pixel number between patches
             num_steps: Sampler iteration number
             sigma_max: Noise sigma max
+            torch_compile: Whether to compile the model with torch.compile
             device: Device to run inference on
         """
         super().__init__()
@@ -665,6 +771,8 @@ class SuperResolutionModel(torch.nn.Module):
 
         self.batch_info = batch_info
         self.net = net
+        if torch_compile:
+            self.torch_compile()
 
         self.net.eval().requires_grad_(False)
 
@@ -683,6 +791,9 @@ class SuperResolutionModel(torch.nn.Module):
             lat, lon
         )
         self.regrid = earth2grid.get_regridder(self.low_res_grid, self.high_res_grid).float()
+
+    def torch_compile(self):
+        self.net = torch.compile(self.net, fullgraph=True)
 
     @classmethod
     def from_pretrained(cls, state_path: str, **kwargs):
@@ -910,6 +1021,7 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
         overlap_size: int = 32,
         num_steps: int = 18,
         sigma_max: int = 800,
+        torch_compile: bool = False,
         window_function: str = "KBD",
         window_alpha: int = 1,
         device: str = "cuda",
@@ -923,6 +1035,7 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
             overlap_size=overlap_size,
             num_steps=num_steps,
             sigma_max=sigma_max,
+            torch_compile=torch_compile,
             device=device,
         )
         window = self._get_window_function(
@@ -1054,7 +1167,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         return self.experts[-1](x, sigma, *args, **kwargs)
 
 
-def load(model: str, root="") -> CBottle3d:
+def load(model: str, root="", **kwargs) -> CBottle3d:
     root = root or environment.CHECKPOINT_ROOT
     if model == "cbottle-3d-moe":
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
@@ -1062,7 +1175,9 @@ def load(model: str, root="") -> CBottle3d:
         )
         rundir = "cBottle-3d"
         paths = [os.path.join(root, rundir, c) for c in checkpoints]
-        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+        return CBottle3d.from_pretrained(
+            paths, sigma_thresholds=(100.0, 10.0), **kwargs
+        )
     elif model == "cbottle-3d-moe-tc":
         rundir = "cBottle-3d"
         checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
@@ -1077,5 +1192,47 @@ def load(model: str, root="") -> CBottle3d:
             sigma_thresholds=(100.0, 10.0),
             separate_classifier_path=classifier_path,
             allow_second_order_derivatives=True,
+            **kwargs,
+        )
+    elif model == "cbottle-3d-moe-aimip-p1":
+        checkpoints = "training-state-000512000.checkpoint,training-state-002048000.checkpoint,training-state-009856000.checkpoint".split(
+            ","
+        )
+        rundir = "aimip_v3"
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+
+    elif model == "cbottle-3d-moe-aimip-p2":
+        checkpoints = "training-state-000512000.checkpoint,training-state-002176000.checkpoint,training-state-009984000.checkpoint".split(
+            ","
+        )
+        rundir = "aimip_v3"
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+
+    elif model == "cbottle-3d-moe-aimip-p3":
+        checkpoints = "training-state-000640000.checkpoint,training-state-002048000.checkpoint,training-state-010112000.checkpoint".split()
+        rundir = "aimip_v3"
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+
+    elif model == "cbottle-3d-moe-aimip-p4":
+        # use this model for p5 with correlation half life 0.001
+        checkpoints = "training-state-000640000.checkpoint,training-state-002176000.checkpoint,training-state-009728000.checkpoint".split(
+            ","
+        )
+        rundir = "aimip_v3"
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(paths, sigma_thresholds=(100.0, 10.0))
+    elif model == "cbottle-3d-video":
+        rundir = "cBottle-3d-video"
+        checkpoints = "training-state-000541152.checkpoint,training-state-001028656.checkpoint,training-state-003209456.checkpoint".split(
+            ","
+        )
+        paths = [os.path.join(root, rundir, c) for c in checkpoints]
+        return CBottle3d.from_pretrained(
+            paths,
+            sigma_thresholds=(316.0, 10.0),
+            **kwargs,
         )
     raise ValueError(model)

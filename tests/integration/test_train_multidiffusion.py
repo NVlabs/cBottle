@@ -29,6 +29,18 @@ def test_train(tmp_path):
             "Try running pytest with `torchrun ... -m pytest` or mpirun."
         )
 
-    super_resolution.train(tmp_path.as_posix(), num_steps=1, log_freq=1, test_fast=True)
+    super_resolution.train(
+        tmp_path.as_posix(),
+        num_steps=1,
+        log_freq=1,
+        test_fast=True,
+        dataloader_num_workers=0,
+    )
     # this should load the checkpoint
-    super_resolution.train(tmp_path.as_posix(), num_steps=1, log_freq=1, test_fast=True)
+    super_resolution.train(
+        tmp_path.as_posix(),
+        num_steps=1,
+        log_freq=1,
+        test_fast=True,
+        dataloader_num_workers=0,
+    )

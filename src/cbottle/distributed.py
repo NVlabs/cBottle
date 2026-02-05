@@ -12,19 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import os
+import datetime
 import torch
 from cbottle import training_stats
 
-# ----------------------------------------------------------------------------
 
+def init(timeout: datetime.timedelta | None = None) -> None:
+    """Initialize torch.distributed using environment variables.
 
-def init():
+    Parameters
+    ----------
+    timeout :
+        Optional timeout passed directly to
+        `torch.distributed.init_process_group`. If None, the default
+        PyTorch timeout is used. Callers should pass an explicit
+        `datetime.timedelta` if they require a longer timeout.
+    """
     if "WORLD_SIZE" not in os.environ:
         if "SLURM_NTASKS" in os.environ:
             os.environ["WORLD_SIZE"] = os.environ.get("SLURM_NTASKS", "1")
         else:
             os.environ["WORLD_SIZE"] = "1"
+
     if "MASTER_ADDR" not in os.environ:
         if (
             int(os.environ["WORLD_SIZE"]) > 1
@@ -35,13 +46,16 @@ def init():
             )
         else:
             os.environ["MASTER_ADDR"] = "localhost"
+
     if "MASTER_PORT" not in os.environ:
         os.environ["MASTER_PORT"] = "29500"
+
     if "RANK" not in os.environ:
         if "SLURM_PROCID" in os.environ:
             os.environ["RANK"] = os.environ.get("SLURM_PROCID", "0")
         else:
             os.environ["RANK"] = "0"
+
     if "LOCAL_RANK" not in os.environ:
         if "SLURM_LOCALID" in os.environ:
             os.environ["LOCAL_RANK"] = os.environ.get("SLURM_LOCALID", "0")
@@ -49,49 +63,36 @@ def init():
             os.environ["LOCAL_RANK"] = "0"
 
     backend = "gloo" if os.name == "nt" else "nccl"
-    torch.distributed.init_process_group(backend=backend, init_method="env://")
+
+    torch.distributed.init_process_group(
+        backend=backend,
+        init_method="env://",
+        timeout=timeout,
+    )
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
 
     sync_device = torch.device("cuda") if get_world_size() > 1 else None
     training_stats.init_multiprocessing(rank=get_rank(), sync_device=sync_device)
 
 
-# ----------------------------------------------------------------------------
-
-
-def get_rank():
+def get_rank() -> int:
     return torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
 
-# ----------------------------------------------------------------------------
-
-
-def get_world_size():
+def get_world_size() -> int:
     return (
         torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
     )
 
 
-# ----------------------------------------------------------------------------
-
-
-def should_stop():
+def should_stop() -> bool:
     return False
 
 
-# ----------------------------------------------------------------------------
-
-
-def update_progress(cur, total):
+def update_progress(cur, total) -> None:
     _ = cur, total
 
 
-# ----------------------------------------------------------------------------
-
-
-def print0(*args, **kwargs):
+def print0(*args, **kwargs) -> None:
     if get_rank() == 0:
         print(*args, **kwargs)
-
-
-# ----------------------------------------------------------------------------

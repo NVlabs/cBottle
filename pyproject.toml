@@ -47,3 +47,6 @@ dev = [
 
 [tool.ruff]
 line-length = 88
+
+[tool.pytest.ini_options]
+norecursedirs = ["scripts/era5_data_prep"]

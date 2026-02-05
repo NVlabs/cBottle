@@ -117,20 +117,28 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
             self.batch_gpu
         )
 
+    def _finalize_network(self, net):
+        return net
+
     def _setup_networks(self):
-        self.ddp = self.net = self.get_network()
+        self.net = self.get_network()
         self.net.train().requires_grad_(True).to(self.device)
+        self.net = self._finalize_network(self.net)
+        self.ddp = self._net_forward = self.net
+        if self.compile:
+            # Compiling must return a new object and not modify the original net.
+            # Need a reference to the original uncompiled net so parameter names are consistent in checkpointing.
+            self._net_forward = self._compile_network(self.net)
         if dist.get_world_size() > 1:
             self.ddp = torch.nn.parallel.DistributedDataParallel(
-                self.net,
+                self._net_forward,
                 device_ids=[self.device],
                 broadcast_buffers=False,
             )
         self.ema = copy.deepcopy(self.net).eval().requires_grad_(False)
 
-        # untrained net for loss by sigma diagnostics
-        self.untrained_net = self.get_network()
-        self.untrained_net.requires_grad_(False).eval().to(self.device)
+    def _compile_network(self, net):
+        return torch.compile(net, fullgraph=True)
 
     @cbottle.profiling.nvtx
     def log_tick(
@@ -300,7 +308,8 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                     indict = self._stage_tuple_batch(batch)
 
                 torch.cuda.nvtx.range_pop()
-                loss = self.train_step(**indict)
+                with torch.autocast("cuda", enabled=self.bf16, dtype=torch.bfloat16):
+                    loss = self.train_step(**indict)
                 training_stats.report("Loss/loss", loss)
                 time_length = loss.shape[2]  # (b, c, t, x)
                 loss_mean = loss.sum().mul(
@@ -316,14 +325,20 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
 
                 total_loss += loss_mean.detach().cpu() / self.num_accumulation_rounds
 
+    def learning_rate(self, cur_nimg: int) -> float:
+        return min(cur_nimg / max(self.lr_rampup_img, 1e-8), 1.0)
+
     @cbottle.profiling.nvtx
     def step_optimizer(self, cur_nimg):
         # Update weights.
         torch.cuda.nvtx.range_push("training_loop:step")
+
+        scale = self.learning_rate(cur_nimg)
         for g in self.optimizer.param_groups:
-            lr = self.optimizer.defaults["lr"] * min(
-                cur_nimg / max(self.lr_rampup_img, 1e-8), 1
+            base_lr = g.setdefault(
+                "base_lr", g.get("lr", self.optimizer.defaults["lr"])
             )
+            lr = base_lr * scale
             g["lr"] = lr
             self.writer.add_scalar("lr", lr, global_step=self.cur_nimg)
         for param in self.net.parameters():
@@ -547,7 +562,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
                 self.cur_nimg,
             )
             self.net.eval()
-            self.validate(self.net)
+            self.validate(self.ddp)
             self.net.train()
 
             # Save network snapshot.

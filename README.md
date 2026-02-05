@@ -61,23 +61,35 @@ python3 scripts/train_coarse.py \
     --loop.network.model_channels 256 \
     --loop.snapshot_ticks 1 \
     --loop.state_dump_ticks 1 \
-    --loop.steps_per_tick 2000 \
+    --loop.steps_per_tick 4000 \
     --loop.batch_gpu 1 \
-    --loop.batch_size 32 \
-    --loop.valid_min_samples 32 \
-    --loop.dataloader_prefetch_factor 10
-    --loop.dataloader_num_workers 8
+    --loop.batch_size 16 \
+    --loop.valid_min_samples 64 \
+    --loop.dataloader_prefetch_factor 10 \
+    --loop.dataloader_num_workers 8 \
+    --loop.lr_rampup_img 50000 \
+    --loop.lr_flat_imgs 0 \
+    --loop.lr_decay_imgs 3150000 \
+    --loop.lr 0.0002 \
+    --loop.lr_min 0 \
+    --loop.bf16 \
+    --loop.channels_last \
+    --loop.compile
 ```
 
 ### Inference
 
-To create netcdf files of the generations (and optionally the corresponding ground truth), run the following:
+Generate multi-step video rollouts as follows:
 ```
-torchrun --nproc-per-node 8 scripts/inference_coarse_video.py \
-    /path/to/your/model.checkpoint \
-    --output_path /output/path \
-    --sample.frame_selection_strategy unconditional
-
+python scripts/inference_coarse_video.py \
+    --dataset era5 \
+    --sample.sigma_max 200 \
+    --sample.frame_selection_strategy first_frame \
+    --sample.bf16 \
+    --sample.mode translate \
+    --sample.autoregression_duration 60  \
+    <CHECKPOINT> \
+    <OUTPUT>
 ```
 
 ## Super-resolution model (cBottle-SR)

@@ -62,7 +62,7 @@ from cbottle.datasets.dataset_2d import (
     encode_sst,
 )
 from cbottle.datasets.ibtracs import IBTracs
-from cbottle.datasets.amip_sst_loader import AmipSSTLoader
+from cbottle.datasets.amip_sst_loader import AmipSSTLoader, AImip_SSTLoader
 from cbottle.datasets.merged_dataset import TimeMergedDataset, TimeMergedMapStyle
 from cbottle.datasets.zarr_loader import ZarrLoader
 from cbottle.training.video.frame_masker import FrameMasker
@@ -119,6 +119,28 @@ VARIABLE_CONFIGS["q"] = VariableConfig(
         "sic",
     ],
 )
+VARIABLE_CONFIGS["aimip"] = VariableConfig(
+    levels=[1000, 850, 700, 500, 300, 200, 50, 10],
+    variables_3d=["U", "V", "T", "Z", "Q"],
+    variables_2d=[
+        "tcwv",
+        "cllvi",
+        "clivi",
+        "tas",
+        "uas",
+        "vas",
+        "rlut",
+        "rsut",
+        "pres_msl",
+        "pr",
+        "rsds",
+        "sst",
+        "sic",
+        "skt",
+        "sp",
+        "2d",
+    ],
+)
 _default_config = VARIABLE_CONFIGS["default"]
 
 
@@ -138,6 +160,13 @@ class DatasetMetadata:
 DATASET_METADATA: dict[str, DatasetMetadata] = {
     "era5": DatasetMetadata(
         name="era5",
+        start="1980",
+        end="2022",
+        time_step=1,
+        time_unit=TimeUnit.HOUR,
+    ),
+    "era5-aimip": DatasetMetadata(
+        name="era5-aimip",
         start="1980",
         end="2022",
         time_step=1,
@@ -246,9 +275,6 @@ def _transform(
     if len(frames) == 1:
         return frames[0]
 
-    if frame_masker is None:
-        raise ValueError("Frame masker must be provided in video mode")
-
     out = {}
 
     out["target"] = torch.cat([f["target"] for f in frames], dim=1)
@@ -262,7 +288,9 @@ def _transform(
     out["labels"] = frames[0]["labels"]
     out["timestamp"] = frames[0]["timestamp"]
 
-    return frame_masker(out)
+    if frame_masker is not None:
+        out = frame_masker(out)
+    return out
 
 
 def _encode_task(
@@ -470,12 +498,13 @@ def _get_loaders(
     Returns:
         List of loaders for the specified dataset
     """
+    use_q = "Q" in variable_config.variables_3d
 
     if dataset == "icon":
         loaders = [
             _loader_from_catalog(
                 catalog.icon_plevel(),
-                variables_3d=["T", "U", "V", "Z", "Q"],
+                variables_3d=["T", "U", "V", "Z"] + (["Q"] if use_q else []),
                 variables_2d=["tcwv"],
                 level_coord_name="level",
                 # convert levels to Pa
@@ -509,10 +538,10 @@ def _get_loaders(
             ),
         ]
 
-    elif dataset == "era5":
+    elif dataset == "era5" or dataset == "era5-aimip":
         target_data_loader = _loader_from_catalog(
             catalog.era5_hpx6(),
-            variables_3d=["u", "v", "t", "z", "q"],
+            variables_3d=["u", "v", "t", "z"] + (["q"] if use_q else []),
             variables_2d=[
                 "sstk",
                 "ci",
@@ -524,6 +553,9 @@ def _get_loaders(
                 "tclw",
                 "tciw",
                 "tcwv",
+                "skt",
+                "sp",
+                "2d",
             ],
             level_coord_name="levels",
             levels=variable_config.levels,
@@ -535,11 +567,15 @@ def _get_loaders(
             grid = earth2grid.healpix.Grid(
                 HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
             )
-            loaders.append(
-                AmipSSTLoader(
-                    grid,
+            if variable_config == VARIABLE_CONFIGS["aimip"]:
+                loaders.append(AImip_SSTLoader(grid))
+                print("used aimip sst data")
+            else:
+                loaders.append(
+                    AmipSSTLoader(
+                        grid,
+                    )
                 )
-            )
         if ibtracs_input:
             loaders.append(IBTracs())
 
@@ -550,11 +586,14 @@ def _get_loaders(
         grid = earth2grid.healpix.Grid(
             HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
         )
-        loaders = [
-            AmipSSTLoader(
-                grid,
-            )
-        ]
+        if variable_config == VARIABLE_CONFIGS["aimip"]:
+            loaders = [AImip_SSTLoader(grid)]
+        else:
+            loaders = [
+                AmipSSTLoader(
+                    grid,
+                )
+            ]
 
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
@@ -595,7 +634,7 @@ def _get_frame_encoder(
             config=variable_config,
         )
 
-    elif dataset == "era5":
+    elif dataset == "era5" or dataset == "era5-aimip":
         label = LABELS.index("era5")
         encode_frame = functools.partial(
             _encode_task,
@@ -631,6 +670,9 @@ def _get_splits(dataset: str):
         test_times = valid_times[valid_times >= "2024-03-06 15:00:00"]
     elif dataset == "era5":
         train_times = valid_times[valid_times < "2018"]
+        test_times = valid_times[valid_times.year == 2018]
+    elif dataset == "era5-aimip":
+        train_times = valid_times[valid_times < "2015"]
         test_times = valid_times[valid_times.year == 2018]
     elif dataset == "amip":
         # AMIP doesn't have train/test split, use all times

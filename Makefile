@@ -19,6 +19,7 @@ docs-serve:
 	uvx --with mkdocs-material mkdocs serve
 
 pytest:
-	torchrun --nproc_per_node 1 -m pytest -vv -rs
+	torchrun --nproc_per_node 1 -m pytest tests/ -vv -rs -k 'unit'
+	torchrun --nproc_per_node 1 -m pytest tests/ -vv -rs -k 'not unit'
 
 .PHONY: docs

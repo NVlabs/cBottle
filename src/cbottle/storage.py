@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import configparser
+from typing import Any
 import os
 import shutil
 import tempfile
@@ -27,7 +28,13 @@ class StorageConfigError(Exception):
     pass
 
 
-def get_storage_options(remote_name, config_path=DEFAULT_PATH):
+def get_filesystem(remote_name, config_path=DEFAULT_PATH) -> fsspec.AbstractFileSystem:
+    return fsspec.filesystem(
+        "s3", **get_storage_options(remote_name, config_path=config_path)
+    )
+
+
+def get_storage_options(remote_name, config_path=DEFAULT_PATH) -> dict[str, Any]:
     if not remote_name:
         return None
     # Parse the rclone config file
