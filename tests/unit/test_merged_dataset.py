@@ -110,9 +110,9 @@ def test_time_merged_dataset(time_length, frame_step, window_stride):
     frames_per_window = (time_length - 1) * frame_step + 1
     valid_length = num_frames - frames_per_window + 1
     expected_windows = (valid_length + window_stride - 1) // window_stride
-    assert len(samples) == expected_windows, (
-        f"Expected {expected_windows} windows, got {len(samples)}"
-    )
+    assert (
+        len(samples) == expected_windows
+    ), f"Expected {expected_windows} windows, got {len(samples)}"
 
     for sample in samples:
         assert sample["target"].shape == (1, target_channels, time_length, num_pixels)
@@ -132,9 +132,9 @@ def test_time_merged_dataset(time_length, frame_step, window_stride):
     expected_starts = list(range(0, chunk_size * window_stride, window_stride))[
         :expected_windows
     ]
-    assert start_indices == expected_starts, (
-        "Without shuffle, windows should be in exact sequential order"
-    )
+    assert (
+        start_indices == expected_starts
+    ), "Without shuffle, windows should be in exact sequential order"
 
     # Test with shuffle=True
     dataset = TimeMergedDataset(
@@ -169,14 +169,14 @@ def test_time_merged_dataset(time_length, frame_step, window_stride):
         start_idx = int(sample["target"][0, 0, 0, 0].item())
         chunk2_indices.append(start_idx)
 
-    assert sorted(chunk1_indices) == sorted(chunk2_indices), (
-        "Chunks should contain same indices"
-    )
+    assert sorted(chunk1_indices) == sorted(
+        chunk2_indices
+    ), "Chunks should contain same indices"
 
     if len(chunk1_indices) != 1:
-        assert chunk1_indices != chunk2_indices, (
-            "Chunks should be in different orders when shuffled"
-        )
+        assert (
+            chunk1_indices != chunk2_indices
+        ), "Chunks should be in different orders when shuffled"
 
 
 @pytest.mark.parametrize(
