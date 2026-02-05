@@ -787,10 +787,10 @@ class SuperResolutionModel(torch.nn.Module):
         # Setup regridders
         lat = np.linspace(-90, 90, 128)[:, None]
         lon = np.linspace(0, 360, 128)[None, :]
-        self.regrid_to_latlon = self.low_res_grid.get_bilinear_regridder_to(
-            lat, lon
-        )
-        self.regrid = earth2grid.get_regridder(self.low_res_grid, self.high_res_grid).float()
+        self.regrid_to_latlon = self.low_res_grid.get_bilinear_regridder_to(lat, lon)
+        self.regrid = earth2grid.get_regridder(
+            self.low_res_grid, self.high_res_grid
+        ).float()
 
     def torch_compile(self):
         self.net = torch.compile(self.net, fullgraph=True)
@@ -983,18 +983,15 @@ class SuperResolutionModel(torch.nn.Module):
         with torch.no_grad():
             # Define denoiser function
             def denoiser(x, t):
-                return (
-                    self._apply_on_patches(
-                        x_hat=x,
-                        x_lr=lr_hr,
-                        t_hat=t,
-                        class_labels=None,
-                        batch_size=128,
-                        global_lr=global_lr,
-                        inbox_patch_index=inbox_patch_index,
-                    )
-                    .to(torch.float64)
-                )
+                return self._apply_on_patches(
+                    x_hat=x,
+                    x_lr=lr_hr,
+                    t_hat=t,
+                    class_labels=None,
+                    batch_size=128,
+                    global_lr=global_lr,
+                    inbox_patch_index=inbox_patch_index,
+                ).to(torch.float64)
 
             # Set denoiser attributes
             denoiser.sigma_max = self.net.sigma_max
