@@ -911,7 +911,6 @@ class SuperResolutionModel(torch.nn.Module):
 
     def denormalize(self, x):
         # Denormalize output
-        # Ewwwww
         if self.batch_info.center is not None and self.batch_info.scales is not None:
             # Convert lists to tensors if necessary
             center = self.batch_info.center
@@ -946,7 +945,6 @@ class SuperResolutionModel(torch.nn.Module):
         """
 
         # Normalize input using batch info
-        # WHY WE DO THIS HERE? WHO KNOWS
         if self.batch_info.center is not None and self.batch_info.scales is not None:
             # Convert lists to tensors if necessary
             center = self.batch_info.center
