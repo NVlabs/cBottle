@@ -746,7 +746,6 @@ class SuperResolutionModel(torch.nn.Module):
         num_steps: int = 18,
         sigma_max: int = 800,
         torch_compile: bool = False,
-        device: str = "cuda", #TODO: remove all device in 
     ):
         """
         Initialize the super-resolution model.
@@ -760,7 +759,6 @@ class SuperResolutionModel(torch.nn.Module):
             num_steps: Sampler iteration number
             sigma_max: Noise sigma max
             torch_compile: Whether to compile the model with torch.compile
-            device: Device to run inference on
         """
         super().__init__()
         self.hpx_level = hpx_level
@@ -797,7 +795,7 @@ class SuperResolutionModel(torch.nn.Module):
         self.net = torch.compile(self.net, fullgraph=True)
 
     @classmethod
-    def from_pretrained(cls, state_path: str, map_location: str = "cpu", **kwargs): #TODO: keep it as it is for map_location for now
+    def from_pretrained(cls, state_path: str, map_location: str = "cpu", **kwargs):
         # Load model
         with checkpointing.Checkpoint(state_path) as checkpoint:
             net = checkpoint.read_model(map_location=map_location)
@@ -1020,7 +1018,6 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
         torch_compile: bool = False,
         window_function: str = "KBD",
         window_alpha: int = 1,
-        device: str = "cuda",
     ):
         super().__init__(
             net=net,
@@ -1032,7 +1029,6 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
             num_steps=num_steps,
             sigma_max=sigma_max,
             torch_compile=torch_compile,
-            device=device,
         )
         window = self._get_window_function(
             patch_size=patch_size,
