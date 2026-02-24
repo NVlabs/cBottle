@@ -154,6 +154,7 @@ class CBottle3d:
         separate_classifier_path: str | None = None,
         sigma_thresholds: tuple[float, ...] = (),
         allow_second_order_derivatives: bool = False,
+        map_location: str = "cpu",
         **kwargs,
     ) -> "CBottle3d":
         net = MixtureOfExpertsDenoiser.from_pretrained(
@@ -167,7 +168,7 @@ class CBottle3d:
             logging.info(f"Opening additional classifier at {separate_classifier_path}")
             with checkpointing.Checkpoint(separate_classifier_path) as c:
                 separate_classifier = c.read_model(
-                    map_location=None,
+                    map_location=map_location,
                     allow_second_order_derivatives=allow_second_order_derivatives,
                 ).eval()
 
@@ -745,7 +746,7 @@ class SuperResolutionModel(torch.nn.Module):
         num_steps: int = 18,
         sigma_max: int = 800,
         torch_compile: bool = False,
-        device: str = "cuda",
+        device: str = "cuda", #TODO: remove all device in 
     ):
         """
         Initialize the super-resolution model.
@@ -796,10 +797,10 @@ class SuperResolutionModel(torch.nn.Module):
         self.net = torch.compile(self.net, fullgraph=True)
 
     @classmethod
-    def from_pretrained(cls, state_path: str, **kwargs):
+    def from_pretrained(cls, state_path: str, map_location: str = "cpu", **kwargs): #TODO: keep it as it is for map_location for now
         # Load model
         with checkpointing.Checkpoint(state_path) as checkpoint:
-            net = checkpoint.read_model()
+            net = checkpoint.read_model(map_location=map_location)
             batch_info = checkpoint.read_batch_info()
         return cls(net, batch_info, **kwargs)
 
@@ -1120,6 +1121,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         sigma_thresholds: tuple[float, ...],
         *,
         allow_second_order_derivatives: bool = False,
+        map_location: str = "cpu",
     ) -> "MixtureOfExpertsDenoiser":
         match path:
             case str():
@@ -1134,7 +1136,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
             logging.info(f"Opening {path}")
             with checkpointing.Checkpoint(path) as c:
                 model = c.read_model(
-                    map_location=None,
+                    map_location=map_location,
                     allow_second_order_derivatives=allow_second_order_derivatives,
                 ).eval()
                 experts.append(model)

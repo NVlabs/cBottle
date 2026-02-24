@@ -61,7 +61,7 @@ class Checkpoint:
             torch.save(net.state_dict(), f)
 
     def read_model(
-        self, net=None, map_location=None, **model_kwargs
+        self, net=None, map_location="cpu", **model_kwargs
     ) -> torch.nn.Module:
         """Read the model from the checkpoint
 
