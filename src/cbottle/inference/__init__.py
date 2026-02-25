@@ -154,6 +154,7 @@ class CBottle3d:
         separate_classifier_path: str | None = None,
         sigma_thresholds: tuple[float, ...] = (),
         allow_second_order_derivatives: bool = False,
+        map_location: str = "cpu",
         **kwargs,
     ) -> "CBottle3d":
         net = MixtureOfExpertsDenoiser.from_pretrained(
@@ -167,7 +168,7 @@ class CBottle3d:
             logging.info(f"Opening additional classifier at {separate_classifier_path}")
             with checkpointing.Checkpoint(separate_classifier_path) as c:
                 separate_classifier = c.read_model(
-                    map_location=None,
+                    map_location=map_location,
                     allow_second_order_derivatives=allow_second_order_derivatives,
                 ).eval()
 
@@ -745,7 +746,6 @@ class SuperResolutionModel(torch.nn.Module):
         num_steps: int = 18,
         sigma_max: int = 800,
         torch_compile: bool = False,
-        device: str = "cuda",
     ):
         """
         Initialize the super-resolution model.
@@ -759,7 +759,6 @@ class SuperResolutionModel(torch.nn.Module):
             num_steps: Sampler iteration number
             sigma_max: Noise sigma max
             torch_compile: Whether to compile the model with torch.compile
-            device: Device to run inference on
         """
         super().__init__()
         self.hpx_level = hpx_level
@@ -796,10 +795,10 @@ class SuperResolutionModel(torch.nn.Module):
         self.net = torch.compile(self.net, fullgraph=True)
 
     @classmethod
-    def from_pretrained(cls, state_path: str, **kwargs):
+    def from_pretrained(cls, state_path: str, map_location: str = "cpu", **kwargs):
         # Load model
         with checkpointing.Checkpoint(state_path) as checkpoint:
-            net = checkpoint.read_model()
+            net = checkpoint.read_model(map_location=map_location)
             batch_info = checkpoint.read_batch_info()
         return cls(net, batch_info, **kwargs)
 
@@ -1019,7 +1018,6 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
         torch_compile: bool = False,
         window_function: str = "KBD",
         window_alpha: int = 1,
-        device: str = "cuda",
     ):
         super().__init__(
             net=net,
@@ -1031,7 +1029,6 @@ class DistilledSuperResolutionModel(SuperResolutionModel):
             num_steps=num_steps,
             sigma_max=sigma_max,
             torch_compile=torch_compile,
-            device=device,
         )
         window = self._get_window_function(
             patch_size=patch_size,
@@ -1120,6 +1117,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         sigma_thresholds: tuple[float, ...],
         *,
         allow_second_order_derivatives: bool = False,
+        map_location: str = "cpu",
     ) -> "MixtureOfExpertsDenoiser":
         match path:
             case str():
@@ -1134,7 +1132,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
             logging.info(f"Opening {path}")
             with checkpointing.Checkpoint(path) as c:
                 model = c.read_model(
-                    map_location=None,
+                    map_location=map_location,
                     allow_second_order_derivatives=allow_second_order_derivatives,
                 ).eval()
                 experts.append(model)

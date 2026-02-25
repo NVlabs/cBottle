@@ -193,7 +193,6 @@ def inference(arg_list=None, customized_dataset=None):
             sigma_max=args.sigma_max,
             window_function=window_function,
             window_alpha=window_alpha,
-            device=device,
         )
     else:
         model = SuperResolutionModel.from_pretrained(
@@ -203,8 +202,9 @@ def inference(arg_list=None, customized_dataset=None):
             overlap_size=args.overlap_size,
             num_steps=args.num_steps,
             sigma_max=args.sigma_max,
-            device=device,
         )
+
+    model = model.to(device)
 
     high_res_level = model.high_res_grid.level
     low_res_level = model.low_res_grid.level
@@ -213,7 +213,7 @@ def inference(arg_list=None, customized_dataset=None):
 
     for batch in tqdm.tqdm(loader, disable=WORLD_RANK != 0):
         target = batch["target"]
-        target = target[0, :, 0]
+        target = target[0, :, 0].to(device)
         with torch.no_grad():
             # coarsen target if input is hpx64 icon
             if not input_path:
@@ -222,7 +222,7 @@ def inference(arg_list=None, customized_dataset=None):
                     npix = lr.size(-1)
                     shape = lr.shape[:-1]
                     lr = lr.view(shape + (npix // 4, 4)).mean(-1)
-                inp = lr.to(target.device)[None, :, None]
+                inp = lr.to(device)[None, :, None]
             # load condition if input path is given
             else:
                 inp = batch["condition"]
