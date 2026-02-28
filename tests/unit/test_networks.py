@@ -242,14 +242,14 @@ def test_SongUnetCalendarEmbeddings(calendar_only_day: bool):
     if calendar_only_day:
         assert cal_embed.shape == (
             n,
-            2 * net.calendar_embed_channels,
+            2,
             t,
             net.domain.numel(),
         )
     else:
         assert cal_embed.shape == (
             n,
-            4 * net.calendar_embed_channels,
+            4,
             t,
             net.domain.numel(),
         )
