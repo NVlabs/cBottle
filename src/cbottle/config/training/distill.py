@@ -227,7 +227,7 @@ class SchedulerConfig:
 
 @dataclass
 class DistillConfig:
-    teacher_ckp_path: str = "/lustre/fsw/portfolios/coreai/projects/coreai_climate_earth2/asui/.cache/cbottle/cBottle-SR.zip"
+    teacher_ckp_path: str = "path/to/cBottle-SR.zip"
     total_batch_size: int = 1024
     training_duration: int = 512000000
     grad_clip_threshold: float = 1000000
