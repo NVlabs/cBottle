@@ -195,9 +195,9 @@ class FastGridPatching2D(BasePatching2D):
                 input=additional_input, size=self.patch_shape, mode="bilinear"
             )
             num_super_patches, rem = divmod(input.shape[0], additional_input.shape[0])
-            assert rem == 0, (
-                f"{additional_input.shape[0]} must be a factor of {input.shape[0]}"
-            )
+            assert (
+                rem == 0
+            ), f"{additional_input.shape[0]} must be a factor of {input.shape[0]}"
             repeats = self.num_patches_y * self.num_patches_x * num_super_patches
             # repeat each patch in the batch patch_num times
             # TODO(jberner): (1) check that this is equal to interleave and rearrange (2) this assumes a specific patching on input
@@ -317,9 +317,9 @@ class FastGenNet(FastGenNetwork):
         if fwd_pred_type is None:
             fwd_pred_type = self.net_pred_type
         else:
-            assert fwd_pred_type in NET_PRED_TYPES, (
-                f"{fwd_pred_type} is not supported as fwd_pred_type"
-            )
+            assert (
+                fwd_pred_type in NET_PRED_TYPES
+            ), f"{fwd_pred_type} is not supported as fwd_pred_type"
 
         # superpatch unfolding
         if (self.patching is not None) and (not is_superpatch_eval):
@@ -353,9 +353,9 @@ class FastGenNet(FastGenNetwork):
             features = self.net.model.features
             # reset features
             self.net.model.features = None
-            assert len(features) == len(feature_indices), (
-                f"{len(features)} != {len(feature_indices)}"
-            )
+            assert len(features) == len(
+                feature_indices
+            ), f"{len(features)} != {len(feature_indices)}"
             if return_features_early:
                 return features
             # score and features; score, features
