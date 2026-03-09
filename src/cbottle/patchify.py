@@ -18,6 +18,7 @@ import einops
 import earth2grid
 import math
 from typing import Optional
+from cbottle import healpix_utils
 
 
 def patch_index_from_bounding_box(order, box, patch_size, overlap_size, device="cuda"):
