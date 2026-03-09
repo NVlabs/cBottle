@@ -30,7 +30,6 @@ from cbottle.datasets.dataset_2d import HealpixDatasetV5
 from cbottle import distributed as cbottle_dist
 from cbottle.distill_helper import (
     DistillLoss,
-    get_scheduler,
     get_window_function,
     get_distill_model,
 )
@@ -40,6 +39,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from fastgen.callbacks.ct_schedule import CTScheduleCallback
 from fastgen.callbacks.ema import EMACallback
 from fastgen.utils.distributed.ddp import DDPWrapper
+from fastgen.utils import lr_scheduler
 
 import dataclasses
 from omegaconf import DictConfig, OmegaConf
@@ -121,7 +121,7 @@ def load_teacher_checkpoint(path: str, *, network, map_location) -> int:
     return step
 
 
-def save_checkpoint(path, *, model_config, network, optimizer, scheduler, step, loss):
+def _save_checkpoint(path, *, model_config, network, optimizer, scheduler, step, loss):
     with cbottle.checkpointing.Checkpoint(path, "w") as checkpoint:
         if isinstance(network, torch.nn.parallel.DistributedDataParallel):
             checkpoint.write_model(network.module)
@@ -139,6 +139,42 @@ def save_checkpoint(path, *, model_config, network, optimizer, scheduler, step, 
                 },
                 f,
             )
+
+
+def save_checkpoint(
+    output_path: str,
+    torch_compile: bool = False,
+    *,
+    model_config,
+    network,
+    optimizer,
+    scheduler,
+    step,
+    loss,
+):
+    # save distilled checkpoint
+    file_name = "cBottle-SR-Distill-{}.zip".format(step)
+    output_path = os.path.join(output_path, file_name)
+    if torch_compile:
+        _save_checkpoint(
+            path=output_path,
+            model_config=model_config,
+            network=network._orig_mod,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            step=step,
+            loss=loss,
+        )
+    else:
+        _save_checkpoint(
+            path=output_path,
+            model_config=model_config,
+            network=network,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            step=step,
+            loss=loss,
+        )
 
 
 def find_latest_checkpoint(output_path: str) -> str:
@@ -301,6 +337,287 @@ def denormalize(dataset, inp):
     return denormalized_inp.numpy()
 
 
+def to_channels_last(lpe, ltarget, llr):
+    if _is_apex_available:
+        lpe = lpe.to(memory_format=torch.channels_last)
+        ltarget = ltarget.to(memory_format=torch.channels_last)
+        llr = llr.to(memory_format=torch.channels_last)
+    return lpe, ltarget, llr
+
+
+def get_optimizer(distill_cfg, model):
+    params = list(filter(lambda kv: "pos_embed" in kv[0], model.named_parameters()))
+    base_params = list(
+        filter(lambda kv: "pos_embed" not in kv[0], model.named_parameters())
+    )
+
+    params = [i[1] for i in params]
+    base_params = [i[1] for i in base_params]
+    optim_cls = getattr(torch.optim, distill_cfg.opt_name)
+    lr_param = distill_cfg.get("lr_param", 5e-4)
+
+    return optim_cls(
+        [
+            {
+                "params": base_params,
+            },  # will get lr=0.0001 (from global `lr`)
+            {"params": params, "lr": lr_param},  # override lr for this group
+        ],
+        **distill_cfg.opt,
+    )
+
+
+def get_scheduler(distill_cfg, optimizer):
+    if distill_cfg.scheduler_name is None:
+        scheduler = LambdaLR(
+            optimizer, lr_lambda=lambda _: 1.0
+        )  # nul scheduler, lr stays constant
+    else:
+        name = distill_cfg.scheduler_name
+        cfg = getattr(distill_cfg.scheduler, distill_cfg.scheduler_name)
+        schedule = getattr(lr_scheduler, name)(**cfg)
+        scheduler = LambdaLR(
+            optimizer,
+            lr_lambda=schedule,
+        )
+    return scheduler
+
+
+def validate_patch(
+    output_batch_valid: dict,
+    ltarget: torch.Tensor,
+    test_dataset: HealpixDatasetV5,
+    bf16: bool = True,
+):
+    wandb_log = {}
+    # generate images and log to wandb
+    image_out = output_batch_valid["gen_rand"]
+    if isinstance(image_out, Callable):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
+            image_out = image_out()
+    assert isinstance(image_out, torch.Tensor)
+
+    # log first element in batch
+    images = {
+        "pred": image_out,
+        "truth": ltarget,
+    }
+
+    # denormalization
+    images = {
+        name: denormalize(test_dataset, img.float().cpu())
+        for name, img in images.items()
+    }
+    for batch_idx in range(images["pred"].shape[0]):
+        for channel_idx in range(images["pred"].shape[1]):
+            channel_name = test_dataset.fields_out[channel_idx]
+            channel_min = np.min(images["truth"][batch_idx, channel_idx])
+            channel_max = np.max(images["truth"][batch_idx, channel_idx])
+            span = (channel_max - channel_min) * 1.5
+            channel_images = []
+            for name, img in images.items():
+                img = img[batch_idx, channel_idx]
+                img = (img - channel_min + 0.25 * span) / (1.5 * span)
+                img = (img * 255).clip(0, 255).astype(np.uint8)
+                channel_images.append(wandb.Image(img, caption=name))
+            wandb_log[f"images/{channel_name}_{batch_idx}"] = channel_images
+
+    # free memory
+    del images, image_out
+    return wandb_log
+
+
+def train_for_step(
+    *,
+    model,
+    lpe,
+    ltarget,
+    llr,
+    optimizer,
+    loss_fn,
+    distill_cfg,
+    callbacks,
+    unwrapped_model,
+    bf16,
+    step,
+    WORLD_RANK,
+    WORLD_SIZE,
+    train_batch_size,
+):
+    optimizer.zero_grad()
+
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
+        loss, loss_map, output_batch = loss_fn(
+            model,
+            img_clean=ltarget,
+            img_lr=llr,
+            pos_embed=lpe,
+            iteration=step,
+        )
+    loss = loss.sum()
+    loss.backward()
+
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        model.module.net.net.parameters(), distill_cfg.grad_clip_threshold
+    )
+    optimizer.step()
+    dist.all_reduce(loss)
+    loss_value = loss.item()
+
+    if WORLD_RANK == 0:
+        training_loss = loss / WORLD_SIZE / train_batch_size
+        loss_map = {f"training/{k}": v for k, v in loss_map.items()}
+        loss_map.update({"training/loss": training_loss})
+        if hasattr(unwrapped_model, "ratio"):
+            loss_map["schedule/ratio"] = unwrapped_model.ratio
+        wandb.log(loss_map, step=step)
+
+    for callback in callbacks:
+        callback.on_training_step_end(
+            unwrapped_model,
+            data_batch=ltarget,
+            output_batch=output_batch,
+            loss_dict=loss_map,
+            iteration=step,
+        )
+    del loss_map, output_batch
+
+    return loss_value, grad_norm
+
+
+def validate_step(
+    *,
+    model,
+    test_loader,
+    patch_iterator_val,
+    test_batch_size,
+    loss_fn,
+    step,
+    is_superpatch,
+    bf16,
+    WORLD_RANK,
+    WORLD_SIZE,
+):
+    val_running_loss = 0
+    count = 0
+    ltarget_out = None
+    output_batch_valid = None
+
+    for batch in test_loader:
+        for lpe, ltarget, llr in patch_iterator_val(batch, test_batch_size):
+            lpe, ltarget, llr = to_channels_last(lpe, ltarget, llr)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
+                loss_valid, loss_map_valid, output_batch_valid = loss_fn(
+                    model,
+                    img_clean=ltarget,
+                    img_lr=llr,
+                    pos_embed=lpe,
+                    iteration=step,
+                    is_superpatch_eval=is_superpatch,
+                )
+            loss_valid = loss_valid.sum()
+            dist.all_reduce(loss_valid)
+            count += 1
+            val_running_loss += loss_valid
+            ltarget_out = ltarget
+
+            if WORLD_RANK == 0:
+                loss_map_valid = {f"valid/{k}": v for k, v in loss_map_valid.items()}
+                loss_map_valid.update(
+                    {
+                        "valid/loss": loss_valid / WORLD_SIZE / test_batch_size,
+                    }
+                )
+                wandb.log(loss_map_valid, step=step)
+        break
+
+    return val_running_loss, count, ltarget_out, output_batch_valid
+
+
+def log_diagnostics(
+    *,
+    model,
+    step,
+    train_loss,
+    val_loss,
+    grad_norm,
+    old_pos,
+    old_pos2,
+    old_conv,
+    old_conv2,
+    tic,
+):
+    pos = model.module.net.net.model.pos_embed.detach().clone()
+
+    conv = None
+    for name, para in model.module.net.net.named_parameters():
+        if "enc.128x128_conv.weight" in name:
+            conv = para.detach().clone()
+
+    gpu_memory_used = torch.cuda.memory_allocated() / (1024 * 1024 * 1024)
+    toc = time.time()
+
+    if old_pos is not None and old_pos2 is not None:
+        a = torch.sqrt(torch.sum((pos - old_pos) ** 2))
+        b = torch.sqrt(torch.sum((old_pos - old_pos2) ** 2))
+        corr_pos = (
+            (torch.sum((pos - old_pos) * (old_pos - old_pos2)) / (a * b))
+            .cpu()
+            .detach()
+            .numpy()
+        )
+
+        a = torch.sqrt(torch.sum((conv - old_conv) ** 2))
+        b = torch.sqrt(torch.sum((old_conv - old_conv2) ** 2))
+        corr_conv = (
+            (torch.sum((conv - old_conv) * (old_conv - old_conv2)) / (a * b))
+            .cpu()
+            .detach()
+            .numpy()
+        )
+
+        print(
+            "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, diff pos: {:.2e},"
+            " corr pos: {:.2f}, diff conv: {:.2e}, corr conv: {:.2f},"
+            " grad norm: {:.2e}, gpu usage: {:.3f}, time: {:6.1f} sec".format(
+                step,
+                train_loss,
+                val_loss,
+                torch.sum(torch.abs(old_pos - pos) / torch.numel(pos))
+                .cpu()
+                .detach()
+                .numpy(),
+                corr_pos,
+                torch.sum(torch.abs(old_conv - conv) / torch.numel(conv))
+                .cpu()
+                .detach()
+                .numpy(),
+                corr_conv,
+                grad_norm,
+                gpu_memory_used,
+                (toc - tic),
+            ),
+            flush=True,
+        )
+    else:
+        print(
+            "  step {:8d} | loss: {:.2e}, val loss: {:.2e},"
+            " grad norm: {:.2e}, gpu usage: {:.3f}, time: {:6.1f} sec".format(
+                step,
+                train_loss,
+                val_loss,
+                grad_norm,
+                gpu_memory_used,
+                (toc - tic),
+            ),
+            flush=True,
+        )
+
+    new_old_pos2 = old_pos.detach().clone() if old_pos is not None else None
+    new_old_conv2 = old_conv.detach().clone() if old_pos is not None else None
+    return pos.detach().clone(), new_old_pos2, conv.detach().clone(), new_old_conv2
+
+
 def train(
     output_path: str,
     customized_dataset=None,
@@ -339,6 +656,13 @@ def train(
         print(f"total number of training steps is {num_steps}")
 
     # TODO: authenticate with wandb
+    if WORLD_RANK == 0:
+        wandb.login(key="0c6f11248d200bef20661161d41812032bb5990a")
+        wandb.init(
+            project="cBottle-distill",
+            resume="allow",  # Options: 'allow', 'must', 'never'
+            config=OmegaConf.to_container(distill_cfg),
+        )
 
     os.makedirs(output_path, exist_ok=True)
     training_sampler = None
@@ -501,11 +825,11 @@ def train(
             )
         )
 
+    # initialize loss function
     loss_fn = DistillLoss(net=teacher_model)
 
     model.on_train_begin()
 
-    # TODO: continue here, need to check specific hierarchy of the model, plan is to replace net with teacher_model to avoid confusion
     save_models = [model.net.net, model.net.logvar_linear]
     for name in ["fake_score", "discriminator"]:
         if hasattr(model, name):
@@ -521,6 +845,7 @@ def train(
     # wrap model with DDP
     model = DDPWrapper(model, device_ids=[LOCAL_RANK], find_unused_parameters=True)
 
+    # initialize patch iterator
     patch_iterator = BatchedPatchIterator(
         model,
         training_dataset.grid,
@@ -539,39 +864,10 @@ def train(
         patch_iterator_val = patch_iterator
 
     # initialize optimizer
-    params = list(filter(lambda kv: "pos_embed" in kv[0], model.named_parameters()))
-    base_params = list(
-        filter(lambda kv: "pos_embed" not in kv[0], model.named_parameters())
-    )
+    optimizer = get_optimizer(distill_cfg, model)
 
-    params = [i[1] for i in params]
-    base_params = [i[1] for i in base_params]
-
-    optim_cls = getattr(torch.optim, distill_cfg.opt_name)
-
-    lr_param = distill_cfg.get("lr_param", 5e-4)
-
-    optimizer = optim_cls(
-        [
-            {
-                "params": base_params,
-            },  # will get lr=0.0001 (from global `lr`)
-            {"params": params, "lr": lr_param},  # override lr for this group
-        ],
-        **distill_cfg.opt,
-    )
-
-    # initialize scheduler based on distill_cfg
-    if distill_cfg.scheduler_name is None:
-        scheduler = LambdaLR(
-            optimizer, lr_lambda=lambda _: 1.0
-        )  # nul scheduler, lr stays constant
-    else:
-        scheduler = get_scheduler(
-            name=distill_cfg.scheduler_name,
-            cfg=getattr(distill_cfg.scheduler, distill_cfg.scheduler_name),
-            optimizer=optimizer,
-        )
+    # initialize scheduler
+    scheduler = get_scheduler(distill_cfg, optimizer)
 
     tic = time.time()
     step = 0
@@ -623,288 +919,100 @@ def train(
 
     while True:
         for batch in training_loader:
-            for lpe, ltarget, llr in patch_iterator(
-                batch, train_batch_size
-            ):  # [B=train_batch_size,C,H,W]
-                # convert input to channelslast
-                if _is_apex_available:
-                    lpe = lpe.to(memory_format=torch.channels_last)
-                    ltarget = ltarget.to(memory_format=torch.channels_last)
-                    llr = llr.to(memory_format=torch.channels_last)
+            for lpe, ltarget, llr in patch_iterator(batch, train_batch_size):
+                lpe, ltarget, llr = to_channels_last(lpe, ltarget, llr)
                 step += 1
-                optimizer.zero_grad()
 
-                # Compute the loss and its gradients
-                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
-                    loss, loss_map, output_batch = loss_fn(
-                        model,
-                        img_clean=ltarget,
-                        img_lr=llr,
-                        pos_embed=lpe,
-                        iteration=step,
-                    )
-                loss = loss.sum()
-                loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    teacher_model.parameters(), distill_cfg.grad_clip_threshold
+                loss_value, grad_norm = train_for_step(
+                    model=model,
+                    lpe=lpe,
+                    ltarget=ltarget,
+                    llr=llr,
+                    optimizer=optimizer,
+                    loss_fn=loss_fn,
+                    distill_cfg=distill_cfg,
+                    callbacks=callbacks,
+                    unwrapped_model=unwrapped_model,
+                    bf16=bf16,
+                    step=step,
+                    WORLD_RANK=WORLD_RANK,
+                    WORLD_SIZE=WORLD_SIZE,
+                    train_batch_size=train_batch_size,
                 )
-                optimizer.step()
-                # avoid synchronizing gpu
-                dist.all_reduce(loss)
-                running_loss += loss.item()
+                running_loss += loss_value
 
-                if WORLD_RANK == 0:
-                    training_loss = loss / WORLD_SIZE / train_batch_size
-                    # wandb
-                    loss_map = {f"training/{k}": v for k, v in loss_map.items()}
-                    loss_map.update(
-                        {
-                            "training/loss": training_loss,
-                        }
-                    )
-                    if hasattr(unwrapped_model, "ratio"):
-                        loss_map["schedule/ratio"] = unwrapped_model.ratio
-                    wandb.log(loss_map, step=step)
-
-                for callback in callbacks:
-                    callback.on_training_step_end(
-                        unwrapped_model,
-                        data_batch=ltarget,
-                        output_batch=output_batch,
-                        loss_dict=loss_map,
-                        iteration=step,
-                    )
-                del loss_map, output_batch
-
-                # logging
                 if step % log_freq == 0:
                     with torch.no_grad():
-                        val_running_loss = 0
-                        for batch in test_loader:
-                            count = 0
-                            for lpe, ltarget, llr in patch_iterator_val(
-                                batch, test_batch_size
-                            ):
-                                if _is_apex_available:
-                                    lpe = lpe.to(memory_format=torch.channels_last)
-                                    ltarget = ltarget.to(
-                                        memory_format=torch.channels_last
-                                    )
-                                    llr = llr.to(memory_format=torch.channels_last)
-                                with torch.autocast(
-                                    "cuda", dtype=torch.bfloat16, enabled=bf16
-                                ):
-                                    loss_valid, loss_map_valid, output_batch_valid = (
-                                        loss_fn(
-                                            model,
-                                            img_clean=ltarget,
-                                            img_lr=llr,
-                                            pos_embed=lpe,
-                                            iteration=step,
-                                            is_superpatch_eval=is_superpatch,
-                                        )
-                                    )
-                                loss_valid = loss_valid.sum()
-                                dist.all_reduce(loss_valid)
-                                count += 1
-                                val_running_loss += loss_valid
-
-                                if WORLD_RANK == 0:
-                                    loss_map_valid = {
-                                        f"valid/{k}": v
-                                        for k, v in loss_map_valid.items()
-                                    }
-                                    loss_map_valid.update(
-                                        {
-                                            "valid/loss": loss_valid
-                                            / WORLD_SIZE
-                                            / test_batch_size,
-                                        }
-                                    )
-                                    wandb.log(loss_map_valid, step=step)
-                            break
-
-                        # print out
-                        if WORLD_RANK == 0:
-                            train_loss_list.append(
-                                running_loss / log_freq / WORLD_SIZE / train_batch_size
+                        val_running_loss, count, val_ltarget, output_batch_valid = (
+                            validate_step(
+                                model=model,
+                                test_loader=test_loader,
+                                patch_iterator_val=patch_iterator_val,
+                                test_batch_size=test_batch_size,
+                                loss_fn=loss_fn,
+                                step=step,
+                                is_superpatch=is_superpatch,
+                                bf16=bf16,
+                                WORLD_RANK=WORLD_RANK,
+                                WORLD_SIZE=WORLD_SIZE,
                             )
-                            val_loss_list.append(
-                                val_running_loss
-                                / len(test_loader)
-                                / count
-                                / WORLD_SIZE
-                                / test_batch_size
-                            )
+                        )
 
-                            wandb.log({"training loss": train_loss_list[-1]}, step=step)
-                            wandb.log({"val loss": val_loss_list[-1]}, step=step)
+                    if WORLD_RANK == 0:
+                        train_loss_list.append(
+                            running_loss / log_freq / WORLD_SIZE / train_batch_size
+                        )
+                        val_loss_list.append(
+                            val_running_loss
+                            / len(test_loader)
+                            / count
+                            / WORLD_SIZE
+                            / test_batch_size
+                        )
 
-                            for i, param_group in enumerate(optimizer.param_groups):
-                                wandb.log(
-                                    {f"lr/group_{i}": param_group["lr"]}, step=step
-                                )
+                        wandb.log({"training loss": train_loss_list[-1]}, step=step)
+                        wandb.log({"val loss": val_loss_list[-1]}, step=step)
 
-                            # generate images and log to wandb
-                            image_out = output_batch_valid["gen_rand"]
-                            if isinstance(image_out, Callable):
-                                with torch.autocast(
-                                    "cuda", dtype=torch.bfloat16, enabled=bf16
-                                ):
-                                    image_out = image_out()
-                            assert isinstance(image_out, torch.Tensor)
+                        for i, param_group in enumerate(optimizer.param_groups):
+                            wandb.log({f"lr/group_{i}": param_group["lr"]}, step=step)
 
-                            # log first element in batch
-                            images = {
-                                "pred": image_out,
-                                "truth": ltarget,
-                            }
+                        wandb_log = validate_patch(
+                            output_batch_valid,
+                            val_ltarget,
+                            test_dataset,
+                            bf16,
+                        )
+                        wandb.log(wandb_log, step=step)
 
-                            # denormalization
-                            images = {
-                                name: denormalize(test_dataset, img.float().cpu())
-                                for name, img in images.items()
-                            }
-                            wandb_log = {"valid/loss": val_loss_list[-1]}
-                            for batch_idx in range(images["pred"].shape[0]):
-                                for channel_idx in range(images["pred"].shape[1]):
-                                    channel_name = test_dataset.fields_out[channel_idx]
-                                    channel_min = np.min(
-                                        images["truth"][batch_idx, channel_idx]
-                                    )
-                                    channel_max = np.max(
-                                        images["truth"][batch_idx, channel_idx]
-                                    )
-                                    span = (channel_max - channel_min) * 1.5
-                                    channel_images = []
-                                    for name, img in images.items():
-                                        img = img[batch_idx, channel_idx]
-                                        img = (img - channel_min + 0.25 * span) / (
-                                            1.5 * span
-                                        )
-                                        img = (img * 255).clip(0, 255).astype(np.uint8)
-                                        channel_images.append(
-                                            wandb.Image(img, caption=name)
-                                        )
-                                    wandb_log[f"images/{channel_name}_{batch_idx}"] = (
-                                        channel_images
-                                    )
+                        old_pos, old_pos2, old_conv, old_conv2 = log_diagnostics(
+                            model=model,
+                            step=step,
+                            train_loss=train_loss_list[-1],
+                            val_loss=val_loss_list[-1],
+                            grad_norm=grad_norm,
+                            old_pos=old_pos,
+                            old_pos2=old_pos2,
+                            old_conv=old_conv,
+                            old_conv2=old_conv2,
+                            tic=tic,
+                        )
 
-                            # free memory
-                            del images, image_out
+                        save_checkpoint(
+                            output_path=output_path,
+                            torch_compile=torch_compile,
+                            model_config=model_config,
+                            network=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            step=step,
+                            loss=train_loss_list,
+                        )
+                        running_loss = 0.0
 
-                            wandb.log(wandb_log, step=step)
-
-                            pos = model.module.net.net.model.pos_embed.detach().clone()
-
-                            for name, para in model.module.net.net.named_parameters():
-                                if "enc.128x128_conv.weight" in name:
-                                    conv = para.detach().clone()
-                            gpu_memory_used = torch.cuda.memory_allocated() / (
-                                1024 * 1024 * 1024
-                            )  # Convert to GB
-                            toc = time.time()
-                            if old_pos is not None and old_pos2 is not None:
-                                a = torch.sqrt(torch.sum((pos - old_pos) ** 2))
-                                b = torch.sqrt(torch.sum((old_pos - old_pos2) ** 2))
-                                corr_pos = (
-                                    (
-                                        torch.sum(
-                                            (pos - old_pos) * (old_pos - old_pos2)
-                                        )
-                                        / (a * b)
-                                    )
-                                    .cpu()
-                                    .detach()
-                                    .numpy()
-                                )
-                                a = torch.sqrt(torch.sum((conv - old_conv) ** 2))
-                                b = torch.sqrt(torch.sum((old_conv - old_conv2) ** 2))
-                                corr_conv = (
-                                    (
-                                        torch.sum(
-                                            (conv - old_conv) * (old_conv - old_conv2)
-                                        )
-                                        / (a * b)
-                                    )
-                                    .cpu()
-                                    .detach()
-                                    .numpy()
-                                )
-                                print(
-                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, diff pos: {:.2e}, corr pos: {:.2f}, diff conv: {:.2e}, corr conv: {:.2f}, grad norm: {:.2e}, gpu usage: {:.3f}, time: {:6.1f} sec".format(
-                                        step,
-                                        train_loss_list[-1],
-                                        val_loss_list[-1],
-                                        torch.sum(
-                                            torch.abs(old_pos - pos) / torch.numel(pos)
-                                        )
-                                        .cpu()
-                                        .detach()
-                                        .numpy(),
-                                        corr_pos,
-                                        torch.sum(
-                                            torch.abs(old_conv - conv)
-                                            / torch.numel(conv)
-                                        )
-                                        .cpu()
-                                        .detach()
-                                        .numpy(),
-                                        corr_conv,
-                                        grad_norm,
-                                        gpu_memory_used,
-                                        (toc - tic),
-                                    ),
-                                    flush=True,
-                                )
-                            else:
-                                print(
-                                    "  step {:8d} | loss: {:.2e}, val loss: {:.2e}, grad norm: {:.2e}, gpu usage: {:.3f}, time: {:6.1f} sec".format(
-                                        step,
-                                        train_loss_list[-1],
-                                        val_loss_list[-1],
-                                        grad_norm,
-                                        gpu_memory_used,
-                                        (toc - tic),
-                                    ),
-                                    flush=True,
-                                )
-                            if old_pos is not None:
-                                old_pos2 = old_pos.detach().clone()
-                                old_conv2 = old_conv.detach().clone()
-                            old_pos = pos.detach().clone()
-                            old_conv = conv.detach().clone()
-
-                            # save distilled checkpoint
-                            file_name = "cBottle-SR-Distill-{}.zip".format(step)
-                            if torch_compile:
-                                save_checkpoint(
-                                    os.path.join(output_path, file_name),
-                                    model_config=model_config,
-                                    network=model._orig_mod,
-                                    optimizer=optimizer,
-                                    scheduler=scheduler,
-                                    step=step,
-                                    loss=train_loss_list,
-                                )
-                            else:
-                                save_checkpoint(
-                                    os.path.join(output_path, file_name),
-                                    model_config=model_config,
-                                    network=model,
-                                    optimizer=optimizer,
-                                    scheduler=scheduler,
-                                    step=step,
-                                    loss=train_loss_list,
-                                )
-                            running_loss = 0.0
-
-                            # free memory after validation/logging
-                            del loss_map_valid, output_batch_valid
+                        del output_batch_valid
 
                 if step >= num_steps:
                     print("training finished!")
                     return
 
-                # break after a single batch if in testing mode
                 scheduler.step()
