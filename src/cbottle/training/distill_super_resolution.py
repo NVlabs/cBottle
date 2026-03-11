@@ -14,12 +14,11 @@
 # limitations under the License.
 import os
 import time
-from typing import Optional, Callable
+from typing import Callable
 
 import earth2grid
 import torch
 import torch.distributed as dist
-import einops
 
 import cbottle.checkpointing
 import cbottle.config.environment as config
@@ -27,10 +26,11 @@ import cbottle.models
 from cbottle.datasets import samplers
 from cbottle.datasets.dataset_2d import HealpixDatasetV5
 from cbottle import distributed as cbottle_dist
-from cbottle.distill_helper import (
+from cbottle._distill_helper import (
     DistillLoss,
-    get_window_function,
-    get_distill_model,
+    CMModel,
+    SCMModel,
+    DMD2Model,
 )
 from cbottle.config.training.distill import DistillConfig
 from cbottle.patchify import BatchedPatchIterator
@@ -46,6 +46,7 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 import numpy as np
 import importlib
+from scipy.signal import windows
 
 # Import apex GroupNorm if installed only
 _is_apex_available = False
@@ -58,34 +59,44 @@ if torch.cuda.is_available():
         pass
 
 
-class EDMLossSR:
-    def __init__(
-        self,
-        P_mean: float = -1.2,
-        P_std: float = 1.2,
-        sigma_data: float = 0.5,
-    ):
-        self.P_mean = P_mean
-        self.P_std = P_std
-        self.sigma_data = sigma_data
+MODEL_MAP = {
+    "cm": CMModel,
+    "scm": SCMModel,
+    "dmd2": DMD2Model,
+}
 
-    def __call__(self, net, img_clean, img_lr, pos_embed):
-        labels = None
-        rnd_normal = torch.randn([img_clean.shape[0], 1, 1, 1], device=img_clean.device)
-        sigma = (rnd_normal * self.P_std + self.P_mean).exp()
-        weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
-        n = torch.randn_like(img_clean) * sigma
-        sigma_lr = None
-        D_yn = net(
-            img_clean + n,
-            sigma,
-            class_labels=labels,
-            condition=img_lr,
-            position_embedding=pos_embed,
-            augment_labels=sigma_lr,
+
+def get_distill_model(teacher_model, model_cfg, distill_cfg, device):
+    # set teacher model and device
+    model_cfg.net = teacher_model
+    model_cfg.device = device
+    model = MODEL_MAP[distill_cfg.mode](model_cfg)
+    return model
+
+
+def get_window_function(patch_size, window_alpha, type="KBD", **kwargs):
+    functions = {
+        "uniform": torch.ones,
+        "hann": lambda ps: windows.hann(ps, sym=True),
+        "hamming": lambda ps: windows.hamming(ps, sym=True),
+        "general_hamming": lambda ps: windows.general_hamming(
+            ps, window_alpha, sym=True
+        ),
+        "kaiser": lambda ps: windows.kaiser(ps, beta=window_alpha * np.pi, sym=True),
+        "tukey": lambda ps: windows.tukey(ps, alpha=window_alpha, sym=True),
+        "gaussian": lambda ps: windows.gaussian(
+            ps, std=window_alpha * ps / 2, sym=True
+        ),
+        "KBD": lambda ps: windows.kaiser_bessel_derived(ps, window_alpha * np.pi),
+    }
+    if type not in functions.keys():
+        raise ValueError(
+            f"Unknown window function type {type}. Supported types are {list(functions.keys())}"
         )
-        loss = weight * ((D_yn - img_clean) ** 2)
-        return loss
+
+    window = torch.tensor(functions[type](patch_size), **kwargs)
+    window = window.unsqueeze(0) * window.unsqueeze(1)
+    return window
 
 
 def load_checkpoint(path: str, *, network, optimizer, scheduler, map_location) -> int:
@@ -231,7 +242,7 @@ def get_optimizer(distill_cfg, model):
 
     params = [i[1] for i in params]
     base_params = [i[1] for i in base_params]
-    optim_cls = getattr(torch.optim, distill_cfg.opt_name)
+    optim_cls = getattr(torch.optim, distill_cfg.optimizer_name)
     lr_param = distill_cfg.get("lr_param", 5e-4)
 
     return optim_cls(
@@ -241,7 +252,7 @@ def get_optimizer(distill_cfg, model):
             },  # will get lr=0.0001 (from global `lr`)
             {"params": params, "lr": lr_param},  # override lr for this group
         ],
-        **distill_cfg.opt,
+        **distill_cfg.optimizer,
     )
 
 
@@ -523,8 +534,6 @@ def train(
     WORLD_SIZE = cbottle_dist.get_world_size()
     WORLD_RANK = cbottle_dist.get_rank()
 
-    # distill_cfg = OmegaConf.load(f"src/cbottle/config/distill_config/{config_name}")
-
     distill_cfg = OmegaConf.create(dataclasses.asdict(DistillConfig()))
     distill_net_config = getattr(distill_cfg, distill_cfg.mode)
     num_steps = distill_cfg.training_duration // WORLD_SIZE // train_batch_size
@@ -534,13 +543,6 @@ def train(
         print(f"total number of training steps is {num_steps}")
 
     # TODO: authenticate with wandb
-    if WORLD_RANK == 0:
-        wandb.login(key="0c6f11248d200bef20661161d41812032bb5990a")
-        wandb.init(
-            project="cBottle-distill",
-            resume="allow",  # Options: 'allow', 'must', 'never'
-            config=OmegaConf.to_container(distill_cfg),
-        )
 
     os.makedirs(output_path, exist_ok=True)
     training_sampler = None

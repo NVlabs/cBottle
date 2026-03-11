@@ -17,8 +17,9 @@ import torch
 import einops
 import earth2grid
 import math
-from typing import Optional
+from typing import Optional, Tuple
 from cbottle import healpix_utils
+from physicsnemo.diffusion.multi_diffusion.patching import BasePatching2D
 
 
 def patch_index_from_bounding_box(order, box, patch_size, overlap_size, device="cuda"):
@@ -423,3 +424,177 @@ class BatchedPatchIterator:
             llr = torch.cat((llr, global_lr_repeat), dim=1)
 
             yield lpe, ltarget, llr
+
+
+class SuperPatching2D(BasePatching2D):
+    """Patching utlities which decompose superpatch into regular patches for superpatch-distillation training.
+
+    Parameters
+    ----------
+    img_shape : Tuple[int, int]
+        Height and width of the superpatch :math:`(H, W)`.
+    patch_shape : Tuple[int, int]
+        Height and width of each patch :math:`(H_p, W_p)`.
+        Must divide the superpatch dimensions after accounting for overlap.
+    overlap_pix : int, optional
+        Number of pixels of overlap between adjacent patches, by default 0.
+        When non-zero, the ``fuse`` method averages (or applies windowed
+        smoothing to) the overlapping regions during reassembly.
+    """
+
+    def __init__(
+        self,
+        img_shape: Tuple[int, int],
+        patch_shape: Tuple[int, int],
+        overlap_pix: int = 0,
+    ):
+        super().__init__(img_shape, patch_shape)
+        self.overlap_pix = overlap_pix
+        self.patch_shape_y = self.patch_shape[0]
+        self.patch_shape_x = self.patch_shape[1]
+        self.img_shape_y = self.img_shape[0]
+        self.img_shape_x = self.img_shape[1]
+
+        self.num_patches_y, remainder_y = divmod(
+            self.img_shape_y - self.overlap_pix, self.patch_shape_y - self.overlap_pix
+        )
+        self.num_patches_x, remainder_x = divmod(
+            self.img_shape_x - self.overlap_pix, self.patch_shape_x - self.overlap_pix
+        )
+        assert remainder_x == 0 and remainder_y == 0
+
+        # Initialize cache for overlap count
+        self.overlap_count = None
+
+    def unfold(self, x):
+        # Cast to float
+        dtype = x.dtype
+        if dtype == torch.int32:
+            x = x.view(torch.float32)
+        elif dtype == torch.int64:
+            x = x.view(torch.float64)
+
+        x = torch.nn.functional.unfold(
+            input=x,
+            kernel_size=(self.patch_shape_y, self.patch_shape_x),
+            stride=(
+                self.patch_shape_y - self.overlap_pix,
+                self.patch_shape_x - self.overlap_pix,
+            ),
+        )
+
+        # cast back
+        if dtype in [torch.int32, torch.int64]:
+            x = x.view(dtype)
+
+        return x
+
+    def fold(self, x):
+        # Cast to float
+        dtype = x.dtype
+        if dtype == torch.int32:
+            x = x.view(torch.float32)
+        elif dtype == torch.int64:
+            x = x.view(torch.float64)
+
+        x = torch.nn.functional.fold(
+            input=x,
+            output_size=(self.img_shape_y, self.img_shape_x),
+            kernel_size=(self.patch_shape_y, self.patch_shape_x),
+            stride=(
+                self.patch_shape_y - self.overlap_pix,
+                self.patch_shape_x - self.overlap_pix,
+            ),
+        )
+
+        # cast back
+        if dtype in [torch.int32, torch.int64]:
+            x = x.view(dtype)
+
+        return x
+
+    def apply(self, input, additional_input=None):
+        unfold = self.unfold(input)
+        unfold = einops.rearrange(
+            unfold,
+            "b (c p_h p_w) (nb_p_h nb_p_w) -> (nb_p_w nb_p_h b) c p_h p_w",
+            p_h=self.patch_shape_y,
+            p_w=self.patch_shape_x,
+            nb_p_h=self.num_patches_y,
+            nb_p_w=self.num_patches_x,
+        )
+        if additional_input is not None:
+            additional_input = torch.nn.functional.interpolate(
+                input=additional_input, size=self.patch_shape, mode="bilinear"
+            )
+            num_super_patches, rem = divmod(input.shape[0], additional_input.shape[0])
+            assert (
+                rem == 0
+            ), f"{additional_input.shape[0]} must be a factor of {input.shape[0]}"
+            repeats = self.num_patches_y * self.num_patches_x * num_super_patches
+            # repeat each patch in the batch patch_num times
+            # TODO(jberner): (1) check that this is equal to interleave and rearrange (2) this assumes a specific patching on input
+            additional_input = additional_input.repeat(repeats, 1, 1, 1)
+            unfold = torch.cat((unfold, additional_input), dim=1)
+
+        return unfold
+
+    def get_overlap_count(self, device, dtype):
+        # compute overlap count
+        ones = torch.ones(
+            (1, 1, self.img_shape_y, self.img_shape_x), device=device, dtype=dtype
+        )
+        overlap_count = self.unfold(ones)
+        return self.fold(overlap_count)
+
+    def fuse(self, input, batch_size=None, window=None):
+        if window is not None:
+            if window.shape[0] == 1:
+                window = window.tile((input.shape[0], input.shape[1], 1, 1))
+
+            x = einops.rearrange(
+                input * window,
+                "(nb_p_w nb_p_h b) c p_h p_w -> b (c p_h p_w) (nb_p_h nb_p_w)",
+                p_h=self.patch_shape_y,
+                p_w=self.patch_shape_x,
+                nb_p_h=self.num_patches_y,
+                nb_p_w=self.num_patches_x,
+            )
+            weights = einops.rearrange(
+                window,
+                "(nb_p_w nb_p_h b) c p_h p_w -> b (c p_h p_w) (nb_p_h nb_p_w)",
+                p_h=self.patch_shape_y,
+                p_w=self.patch_shape_x,
+                nb_p_h=self.num_patches_y,
+                nb_p_w=self.num_patches_x,
+            )
+
+            # Stitch patches together (by summing over overlapping patches)
+            folded = self.fold(x)
+            weights = self.fold(weights)
+            return folded / weights
+        else:
+            # Reshape input to make it 3D to apply fold
+            x = einops.rearrange(
+                input,
+                "(nb_p_w nb_p_h b) c p_h p_w -> b (c p_h p_w) (nb_p_h nb_p_w)",
+                p_h=self.patch_shape_y,
+                p_w=self.patch_shape_x,
+                nb_p_h=self.num_patches_y,
+                nb_p_w=self.num_patches_x,
+            )
+            # Stitch patches together (by summing over overlapping patches)
+            folded = self.fold(x)
+
+            if self.overlap_count is None:
+                self.overlap_count = self.get_overlap_count(
+                    device=folded.device, dtype=folded.dtype
+                )
+            if not (
+                self.overlap_count.dtype == folded.dtype
+                and self.overlap_count.device == folded.device
+            ):
+                self.overlap_count = self.overlap_count.to(folded)
+
+            # Normalize by overlap count
+            return folded / self.overlap_count

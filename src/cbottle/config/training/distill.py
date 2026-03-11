@@ -24,7 +24,7 @@ class PatchingConfig:
 
 
 @dataclass
-class OptConfig:
+class OptimizerConfig:
     lr: float = 1e-7
     weight_decay: float = 0.0
     betas: List[float] = field(default_factory=lambda: [0.9, 0.99])
@@ -53,18 +53,39 @@ class SampleTConfig:
 
 
 @dataclass
-class LossConfig:
+class CMLossConfig:
+    """Config for the losses in CM"""
+
+    # use consistency distillation
     use_cd: bool = False
-    huber_const: Optional[float] = None
-    use_squared_l2: Optional[bool] = None
-    weighting_ct_loss: Optional[str] = None
-    # SCM-specific extensions:
-    tagent_warmup_steps: Optional[int] = None
-    tangent_warmup_const: Optional[float] = None
-    prior_weighting_enabled: Optional[bool] = None
-    g_norm_spatial_invariance: Optional[bool] = None
-    divide_x_0_spatial_dim: Optional[bool] = None
-    use_jvp_finite_diff: Optional[bool] = None
+    # the constant value in the pseudo-huber loss
+    huber_const: float = 1e-8
+    # use the squared l2 loss or the l2 loss
+    use_squared_l2: bool = False
+    # weighting of the CT loss, choices: ['default', 'c_out', 'c_out_sq', 'sqrt', 'one']
+    weighting_ct_loss: str = "default"
+
+
+@dataclass
+class sCMLossConfig:
+    """Config for the losses in sCM"""
+
+    # use consistency distillation
+    use_cd: bool = False
+    # warm-up steps for tangent
+    tangent_warmup_steps: int = 10000
+    # tangent normalization constant
+    tangent_warmup_const: float = 0.1
+    # enable prior weighting
+    prior_weighting_enabled: bool = True
+    # enable g_norm_spatial_invariance
+    g_norm_spatial_invariance: bool = True
+    # enable divide_x_0_spatial_dim
+    divide_x_0_spatial_dim: bool = True
+    # enable finite difference estimate of JVP
+    use_jvp_finite_diff: bool = False
+    # episilon t in finite difference estimation of JVP
+    jvp_finite_diff_eps: float = 1e-3
 
 
 @dataclass
@@ -86,19 +107,31 @@ class CallbacksConfig:
 
 
 @dataclass
-class CmModelConfig:
+class BaseModelConfig:
     use_ema: bool = False
+    # multistep generation if larger than 1 (default: single-step generation)
     student_sample_steps: int = 1
+    # sampling type in multistep generation ('sde', 'ode')
     student_sample_type: str = "sde"
+    # precision for model/optimizer states and data - recommended to be float32 if precision_amp is not None
     precision: str = "float32"
+    # AMP during training - if None or equal to precision, AMP is disabled during training.
     precision_amp: Optional[str] = None
+    # AMP during inference - if None or equal to precision, AMP is disabled during inference.
     precision_amp_infer: Optional[str] = None
+    # AMP during en-/decoding (e.g., for VAEs or text encoders) - if None or equal to precision, AMP is disabled during en-/decoding.
     precision_amp_enc: Optional[str] = None
+    # FSDP2 precision for parameter storage and gradient reduction.
+    # If None, defaults to `precision`. Useful for storing params/grads in float32 while computing in bfloat16.
     precision_fsdp: Optional[str] = None
+    # whether to add the teacher model to the fsdp_dict
     add_teacher_to_fsdp_dict: bool = True
 
-    loss_config: LossConfig = field(
-        default_factory=lambda: LossConfig(
+
+@dataclass
+class CMModelConfig(BaseModelConfig):
+    loss_config: CMLossConfig = field(
+        default_factory=lambda: CMLossConfig(
             use_cd=False,
             huber_const=0.06,
             use_squared_l2=False,
@@ -123,8 +156,8 @@ class CmModelConfig:
 
 
 @dataclass
-class CmConfig:
-    model: CmModelConfig = field(default_factory=CmModelConfig)
+class CMConfig:
+    model: CMModelConfig = field(default_factory=CMModelConfig)
     callbacks: CallbacksConfig = field(
         default_factory=lambda: CallbacksConfig(
             ct_schedule=CtScheduleConfig(
@@ -135,12 +168,11 @@ class CmConfig:
 
 
 @dataclass
-class ScmModelConfig:
-    use_ema: bool = False
-    loss_config: LossConfig = field(
-        default_factory=lambda: LossConfig(
+class sCMModelConfig(BaseModelConfig):
+    loss_config: sCMLossConfig = field(
+        default_factory=lambda: sCMLossConfig(
             use_cd=False,
-            tagent_warmup_steps=10000,
+            tangent_warmup_steps=10000,
             tangent_warmup_const=0.1,
             prior_weighting_enabled=True,
             g_norm_spatial_invariance=True,
@@ -162,14 +194,13 @@ class ScmModelConfig:
 
 
 @dataclass
-class ScmConfig:
-    model: ScmModelConfig = field(default_factory=ScmModelConfig)
+class sCMConfig:
+    model: sCMModelConfig = field(default_factory=sCMModelConfig)
     # callbacks: Optional[CallbacksConfig] = None  # Can be added if needed
 
 
 @dataclass
-class Dmd2ModelConfig:
-    use_ema: bool = False
+class DMD2ModelConfig(BaseModelConfig):
     sample_t_cfg: SampleTConfig = field(
         default_factory=lambda: SampleTConfig(
             train_p_mean=0.0,
@@ -187,14 +218,8 @@ class Dmd2ModelConfig:
 
 
 @dataclass
-class Dmd2Config:
-    model: Dmd2ModelConfig = field(default_factory=Dmd2ModelConfig)
-
-
-@dataclass
-class ModulusDefaultSchedulerConfig:
-    lr_decay: float = 1.0
-    lr_rampup: int = 0
+class DMD2Config:
+    model: DMD2ModelConfig = field(default_factory=DMD2ModelConfig)
 
 
 @dataclass
@@ -214,9 +239,6 @@ class LambdaLinearSchedulerConfig:
 
 @dataclass
 class SchedulerConfig:
-    modulus_default: ModulusDefaultSchedulerConfig = field(
-        default_factory=ModulusDefaultSchedulerConfig
-    )
     LambdaInverseSquareRootScheduler: LambdaInverseSquareRootSchedulerConfig = field(
         default_factory=LambdaInverseSquareRootSchedulerConfig
     )
@@ -227,20 +249,22 @@ class SchedulerConfig:
 
 @dataclass
 class DistillConfig:
-    teacher_ckp_path: str = "path/to/cBottle-SR.zip"
+    # teacher_ckp_path: str = "path/to/cBottle-SR.zip"
+    teacher_ckp_path: str = "/lustre/fsw/portfolios/coreai/projects/coreai_climate_earth2/asui/.cache/cbottle/cBottle-SR.zip"
     total_batch_size: int = 1024
     training_duration: int = 512000000
     grad_clip_threshold: float = 1000000
     patching: Optional[PatchingConfig] = None  # disable superpatch training
+    # patching: PatchingConfig = field(default_factory=PatchingConfig) #enable superpatch training
     scheduler_name: str = "LambdaInverseSquareRootScheduler"
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
-    opt_name: str = "Adam"
-    opt: OptConfig = field(
-        default_factory=lambda: OptConfig(
+    optimizer_name: str = "Adam"
+    optimizer: OptimizerConfig = field(
+        default_factory=lambda: OptimizerConfig(
             lr=1e-7, weight_decay=0.0, betas=[0.9, 0.99], eps=1e-11
         )
     )
     mode: str = "cm"
-    cm: CmConfig = field(default_factory=CmConfig)
-    scm: ScmConfig = field(default_factory=ScmConfig)
-    dmd2: Dmd2Config = field(default_factory=Dmd2Config)
+    cm: CMConfig = field(default_factory=CMConfig)
+    scm: sCMConfig = field(default_factory=sCMConfig)
+    dmd2: DMD2Config = field(default_factory=DMD2Config)
