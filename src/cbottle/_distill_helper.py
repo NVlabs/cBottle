@@ -106,6 +106,7 @@ class DistillLoss:
             pos_embed=pos_embed,
             labels=labels,
             augment_labels=augment_labels,
+            iteration=iteration,
             is_superpatch_eval=is_superpatch_eval,
         )
 
@@ -277,7 +278,7 @@ class CMModel(CMBaseModel):
 
 
 class SCMModel(SCMBaseModel):
-    """Continuous-time Consistency Model with TrigFlow for cBottle distillation.
+    """-time Consistency Model with TrigFlow for cBottle distillation.
 
     A wrapper around the FastGen sCM model in FastGen framework.
     See `fastgen.methods.consistency_model.sCM.SCMModel` for more details.

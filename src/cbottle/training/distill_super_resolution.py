@@ -323,7 +323,7 @@ def train_for_step(
     ltarget,
     llr,
     optimizer,
-    loss_fn,
+    loss_fn: DistillLoss,
     distill_cfg,
     callbacks,
     unwrapped_model,
