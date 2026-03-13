@@ -278,7 +278,7 @@ class CMModel(CMBaseModel):
 
 
 class SCMModel(SCMBaseModel):
-    """-time Consistency Model with TrigFlow for cBottle distillation.
+    """Continuous-time Consistency Model with TrigFlow for cBottle distillation.
 
     A wrapper around the FastGen sCM model in FastGen framework.
     See `fastgen.methods.consistency_model.sCM.SCMModel` for more details.
