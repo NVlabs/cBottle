@@ -143,9 +143,12 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
     def times(self) -> pd.DatetimeIndex:
         return pd.DatetimeIndex(self._times)
 
-    def set_times(self, times):
+    def set_times(self, times, drop_extra=False):
         self._times = _split(
-            cbottle.datetime.as_numpy(times), self.rank, self.world_size
+            cbottle.datetime.as_numpy(times),
+            self.rank,
+            self.world_size,
+            drop_extra=drop_extra,
         )
 
     def _load_chunk(self, chunk: int):

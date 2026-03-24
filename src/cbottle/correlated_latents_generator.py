@@ -160,16 +160,18 @@ class CorrelatedLatentGenerator:
                     (channels, time_length, spatial_dims), device=self.device
                 )
         else:
-            # For time jumps, use a deterministic seed based on original seed + time_step
             jump_generator = torch.Generator(device=self.device)
-            # Use original seed from self.rng + time_step for deterministic initialization
             original_seed = self.rng.initial_seed()
-            jump_seed = (original_seed + time_step) % (
-                2**63 - 1
-            )  # Keep within valid range
-            jump_generator.manual_seed(jump_seed)
+            jump_seed = (original_seed + time_step) % (2**63 - 1)
 
-            # Sample from stationary distribution
+            # Re-seed the main RNG so that each rank's AR(1) noise innovations
+            # are unique. Without this, all ranks > 0 share identical RNG state
+            # (the original seed, never drawn from), producing identical noise.
+            noise_seed = (original_seed * 6364136223846793005 + time_step) % (2**63 - 1)
+            self.rng.manual_seed(noise_seed)
+
+            # Sample initial state from stationary distribution N(0,1)
+            jump_generator.manual_seed(jump_seed)
             self.current_state = torch.randn(
                 (channels, time_length, spatial_dims),
                 device=self.device,
@@ -178,7 +180,7 @@ class CorrelatedLatentGenerator:
 
             logger.debug(
                 f"Rank {self.rank}: Initialized state at time step {time_step} "
-                f"using seed {jump_seed}"
+                f"using jump_seed={jump_seed}, noise_seed={noise_seed}"
             )
 
         self.time_step = time_step

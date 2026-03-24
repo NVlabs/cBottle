@@ -38,15 +38,12 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Hard-coded settings (matching correlated_inference.py)
-MODEL_NAME = "cbottle-3d-moe-aimip"
 DATASET_NAME = "amip"
-CORRELATION_HALF_LIFE = 8.0
 SEED = 42
 BATCH_SIZE = 20
 HPX_LEVEL = 6
 START_TIME = "1978-10-01T00:00:00"
-END_TIME = "2025-01-01T00:00:00"
+END_TIME = "2024-12-31T21:00:00"
 FREQ = "3h"
 
 
@@ -57,6 +54,8 @@ def save_inferences_correlated(
     rank: int,
     world_size: int,
     total_times: int,
+    model_name: str = "",
+    correlation_half_life: float = 8.0,
 ):
     """
     Save inferences with temporally correlated latents.
@@ -64,24 +63,22 @@ def save_inferences_correlated(
     This function handles distributed inference with proper temporal correlation
     by tracking global time indices and using CorrelatedLatentGenerator.
     """
-    # Initialize correlated latent generator
-    # Use the same seed across all ranks to ensure shared random sequence
     latent_generator = CorrelatedLatentGenerator(
         device=torch.device("cuda"),
-        correlation_half_life=CORRELATION_HALF_LIFE,
-        seed=SEED,  # Same seed for all ranks
+        correlation_half_life=correlation_half_life,
+        seed=SEED,
         rank=rank,
     )
 
     logger.info(
-        f"Rank {rank}: Initialized CorrelatedLatentGenerator with half-life={CORRELATION_HALF_LIFE}, seed={SEED}"
+        f"Rank {rank}: Initialized CorrelatedLatentGenerator with half-life={correlation_half_life}, seed={SEED}"
     )
 
     # Initialize netCDF writer
     attrs = {
-        "correlation_half_life": CORRELATION_HALF_LIFE,
+        "correlation_half_life": correlation_half_life,
         "seed": SEED,
-        "model": MODEL_NAME,
+        "model": model_name,
     }
     nc_config = NetCDFConfig(
         hpx_level=HPX_LEVEL,
@@ -162,30 +159,42 @@ def save_inferences_correlated(
 
 
 def main():
-    import sys
-
     logging.basicConfig(level=logging.INFO)
     warnings.filterwarnings("ignore", "Cannot do a zero-copy NCHW to NHWC")
 
-    # Simple CLI: just output path
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <output_path>")
-        print("\nHard-coded settings:")
-        print(f"  Model: {MODEL_NAME}")
-        print(f"  Dataset: {DATASET_NAME}")
-        print(f"  Time range: {START_TIME} to {END_TIME} (freq: {FREQ})")
-        print(f"  Batch size: {BATCH_SIZE}")
-        print(f"  Correlation half-life: {CORRELATION_HALF_LIFE}")
-        print(f"  Seed: {SEED}")
-        sys.exit(1)
+    import argparse
 
-    output_path = sys.argv[1]
+    parser = argparse.ArgumentParser(description="Distributed correlated inference")
+    parser.add_argument("output_path", type=str)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="cbottle-3d-moe-aimip",
+        help="Model name (e.g. cbottle-3d-moe-aimip-p1, -p2, -p3, -p4)",
+    )
+    parser.add_argument(
+        "--half-life",
+        type=float,
+        default=8.0,
+        help="Correlation half-life in time steps (default: 8.0)",
+    )
+    parser.add_argument(
+        "--sst-offset",
+        type=float,
+        default=0.0,
+        help="Uniform SST offset in Kelvin (e.g. 2.0 or 4.0 for warming experiments)",
+    )
+    args = parser.parse_args()
+
+    output_path = args.output_path
+    model_name = args.model
+    correlation_half_life = args.half_life
+    sst_offset = args.sst_offset
 
     dist.init()
 
-    # Load model
-    logger.info(f"Loading model: {MODEL_NAME}")
-    model = cbottle.inference.load(MODEL_NAME)
+    logger.info(f"Loading model: {model_name}")
+    model = cbottle.inference.load(model_name)
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -205,6 +214,9 @@ def main():
     batch_info = model.coords.batch_info
     variables = dataset_3d.guess_variable_config(batch_info.channels)
 
+    if sst_offset != 0.0:
+        logger.info(f"Applying SST offset: {sst_offset} K")
+
     dataset = dataset_3d.get_dataset(
         rank=rank,
         world_size=world_size,
@@ -214,6 +226,7 @@ def main():
         infinite=False,
         shuffle=False,
         variable_config=VARIABLE_CONFIGS[variables],
+        sst_offset=sst_offset,
     )
 
     # Set times
@@ -239,6 +252,8 @@ def main():
         rank=rank,
         world_size=world_size,
         total_times=total_times,
+        model_name=model_name,
+        correlation_half_life=correlation_half_life,
     )
 
 
