@@ -70,7 +70,7 @@ class DistillLoss:
         labels,
         augment_labels,
         iteration=None,
-        is_superpatch_eval=False,
+        eval_on_regular_patches=False,
     ):
         assert not any(p.requires_grad for p in [img_clean, img_lr])
         data = {
@@ -80,7 +80,7 @@ class DistillLoss:
                 img_lr,
                 pos_embed,
                 augment_labels,
-                is_superpatch_eval,
+                eval_on_regular_patches,
             ),
             "neg_condition": None,
         }
@@ -95,7 +95,9 @@ class DistillLoss:
         img_lr,
         pos_embed,
         iteration=None,
-        is_superpatch_eval=False,
+        # whether to evaluate on regular patches during super-patch training
+        # required to evaluate on pre-saved regular patch to better compare performance
+        eval_on_regular_patches=False,
     ):
         labels = None
         augment_labels = None
@@ -107,7 +109,7 @@ class DistillLoss:
             labels=labels,
             augment_labels=augment_labels,
             iteration=iteration,
-            is_superpatch_eval=is_superpatch_eval,
+            eval_on_regular_patches=eval_on_regular_patches,
         )
 
 
@@ -154,7 +156,7 @@ class cBottleFastGenNet(FastGenNetwork):
         return_logvar=False,
         fwd_pred_type: Optional[str] = None,
     ):
-        labels, img_lr, pos_embed, augment_labels, is_superpatch_eval = condition
+        labels, img_lr, pos_embed, augment_labels, eval_on_regular_patches = condition
         # squeeze all dims after the first one and expand to batchsize
         t = t.squeeze(list(range(1, t.ndim))).expand(y_t.shape[0])
         assert t.shape == (y_t.shape[0],)
@@ -173,7 +175,7 @@ class cBottleFastGenNet(FastGenNetwork):
             ), f"{fwd_pred_type} is not supported as fwd_pred_type"
 
         # superpatch unfolding
-        if (self.patching is not None) and (not is_superpatch_eval):
+        if (self.patching is not None) and (not eval_on_regular_patches):
             y_t = self.patching.apply(y_t)
             img_lr = self.patching.apply(img_lr)
             pos_embed = self.patching.apply(pos_embed)
@@ -189,7 +191,7 @@ class cBottleFastGenNet(FastGenNetwork):
         )
 
         # superpatch folding
-        if (self.patching is not None) and (not is_superpatch_eval):
+        if (self.patching is not None) and (not eval_on_regular_patches):
             out = self.patching.fuse(out, window=self.window)
 
         out = self.noise_scheduler.convert_model_output(

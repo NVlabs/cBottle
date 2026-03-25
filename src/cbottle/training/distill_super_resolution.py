@@ -375,6 +375,9 @@ def train_for_step(
 
 
 def validate_step(
+    # whether to evaluate on regular patches during super-patch training
+    # required to evaluate on pre-saved regular patch to better compare performance
+    eval_on_regular_patches: bool = False,
     *,
     model,
     test_loader,
@@ -382,7 +385,6 @@ def validate_step(
     test_batch_size,
     loss_fn,
     step,
-    is_superpatch,
     bf16,
     WORLD_RANK,
     WORLD_SIZE,
@@ -402,7 +404,7 @@ def validate_step(
                     img_lr=llr,
                     pos_embed=lpe,
                     iteration=step,
-                    is_superpatch_eval=is_superpatch,
+                    eval_on_regular_patches=eval_on_regular_patches,
                 )
             loss_valid = loss_valid.sum()
             dist.all_reduce(loss_valid)
@@ -831,7 +833,6 @@ def train(
                                 test_batch_size=test_batch_size,
                                 loss_fn=loss_fn,
                                 step=step,
-                                is_superpatch=is_superpatch,
                                 bf16=bf16,
                                 WORLD_RANK=WORLD_RANK,
                                 WORLD_SIZE=WORLD_SIZE,
