@@ -17,7 +17,9 @@ import torch
 import einops
 import earth2grid
 import math
-from typing import Optional
+from typing import Optional, Tuple
+from cbottle import healpix_utils
+from physicsnemo.diffusion.multi_diffusion.patching import BasePatching2D
 
 
 def patch_index_from_bounding_box(order, box, patch_size, overlap_size, device="cuda"):
@@ -300,3 +302,299 @@ def apply_on_patches(
             x=nside,
         )
     return xy_grid.reorder(src_grid.pixel_order, out_xy)
+
+
+class BatchedPatchIterator:
+    def __init__(
+        self,
+        net: torch.nn.Module,
+        training_dataset_grid: earth2grid.healpix.Grid,
+        lr_level: int,
+        img_resolution: int,
+        time_length: int = 1,
+        padding: Optional[int] = None,
+        shuffle: bool = True,
+    ):
+        self.net = net
+        self.lr_level = lr_level
+        self.time_length = time_length
+        self.img_resolution = img_resolution
+        self.sr_level = training_dataset_grid.level
+        self.padding = padding if padding is not None else img_resolution // 2
+        self.shuffle = shuffle
+
+        # Setup regridders
+        low_res_grid = earth2grid.healpix.Grid(
+            lr_level, pixel_order=earth2grid.healpix.PixelOrder.NEST
+        )
+        lat = torch.linspace(-90, 90, self.img_resolution)[:, None].cpu().numpy()
+        lon = torch.linspace(0, 360, self.img_resolution)[None, :].cpu().numpy()
+        self.regrid_to_latlon = low_res_grid.get_bilinear_regridder_to(lat, lon).cuda()
+        self.regrid = earth2grid.get_regridder(low_res_grid, training_dataset_grid)
+        self.regrid.cuda().float()
+        self.coordinate_map = self.make_coordinate_map(self.sr_level, self.padding)
+
+    @staticmethod
+    def make_coordinate_map(level: int, padding: int, device="cuda") -> torch.Tensor:
+        """
+        Returns a tensor of shape (1, 12 * X * Y), where X=Y=NSIDE with padding
+        Pixel ID layout:
+            id = face * X * Y + row * Y + col
+        """
+        nside = 2**level
+        nside_padded = nside + 2 * padding
+        ids = torch.arange(12 * nside_padded**2, dtype=torch.float32, device=device)
+        ids = ids.view(1, 12, nside_padded, nside_padded)
+        return ids
+
+    def extract_positional_embeddings(self, patch_coord_map, padded_pe):
+        # Decode the top-left ID of every patch to get its patch coordinates
+        ids = patch_coord_map[:, 0, 0, 0].long()
+        npix_padded = self.coordinate_map.shape[-1]
+        face, rem = (
+            torch.div(ids, npix_padded**2, rounding_mode="floor"),
+            torch.remainder(ids, npix_padded**2),
+        )
+        row, col = (
+            torch.div(rem, npix_padded, rounding_mode="floor"),
+            torch.remainder(rem, npix_padded),
+        )
+
+        # get the positional embedding slice corresponding to each patch
+        lpe = torch.stack(
+            [
+                padded_pe[
+                    :,
+                    int(f),
+                    int(r) : int(r) + self.img_resolution,
+                    int(c) : int(c) + self.img_resolution,
+                ]
+                for f, r, c in zip(face, row, col)
+            ],
+            dim=0,
+        )
+        return lpe
+
+    def compute_low_res_conditioning(self, target):
+        # Get low res version
+        lr = target.clone()  #
+        for _ in range(self.sr_level - self.lr_level):
+            lr = healpix_utils.average_pool(lr)
+        global_lr = self.regrid_to_latlon(lr.double())[None,].cuda()
+        lr = self.regrid(lr)
+        return lr, global_lr
+
+    def __call__(self, batch, batch_size):
+        target = batch["target"].cuda()
+        target = einops.rearrange(target, "c t x -> (t c) x", t=self.time_length)
+
+        lr, global_lr = self.compute_low_res_conditioning(target)
+
+        # Create patches
+        patches = healpix_utils.to_patches(
+            [target, lr],
+            patch_size=self.img_resolution,
+            batch_size=batch_size,
+            padding=self.padding,
+            pre_padded_tensors=[self.coordinate_map],
+            shuffle=self.shuffle,
+        )
+        del target, lr
+
+        for ltarget, llr, patch_coord_map, _ in patches:
+            faces_pe = healpix_utils.to_faces(self.net.module.net.net.model.pos_embed)
+            padded_pe = earth2grid.healpix.pad(faces_pe, padding=self.padding)
+
+            lpe = self.extract_positional_embeddings(patch_coord_map, padded_pe)
+
+            global_lr_repeat = einops.repeat(
+                global_lr,
+                "1 (t c) x y -> (b t) c x y",
+                b=llr.shape[0],
+                t=self.time_length,
+            )
+            lpe = einops.repeat(lpe, "b c x y -> (b t) c x y", t=self.time_length)
+            llr = einops.rearrange(
+                llr.cuda(), "b (t c) x y -> (b t) c x y", t=self.time_length
+            )
+            ltarget = einops.rearrange(
+                ltarget.cuda(), "b (t c) x y -> (b t) c x y", t=self.time_length
+            )
+
+            llr = torch.cat((llr, global_lr_repeat), dim=1)
+
+            yield lpe, ltarget, llr
+
+
+class SuperPatching2D(BasePatching2D):
+    """Patching utlities which decompose superpatch into regular patches for superpatch-distillation training.
+
+    Parameters
+    ----------
+    img_shape : Tuple[int, int]
+        Height and width of the superpatch :math:`(H, W)`.
+    patch_shape : Tuple[int, int]
+        Height and width of each patch :math:`(H_p, W_p)`.
+        Must divide the superpatch dimensions after accounting for overlap.
+    overlap_pix : int, optional
+        Number of pixels of overlap between adjacent patches, by default 0.
+        When non-zero, the ``fuse`` method averages (or applies windowed
+        smoothing to) the overlapping regions during reassembly.
+    """
+
+    def __init__(
+        self,
+        img_shape: Tuple[int, int],
+        patch_shape: Tuple[int, int],
+        overlap_pix: int = 0,
+    ):
+        super().__init__(img_shape, patch_shape)
+        self.overlap_pix = overlap_pix
+        self.patch_shape_y = self.patch_shape[0]
+        self.patch_shape_x = self.patch_shape[1]
+        self.img_shape_y = self.img_shape[0]
+        self.img_shape_x = self.img_shape[1]
+
+        self.num_patches_y, remainder_y = divmod(
+            self.img_shape_y - self.overlap_pix, self.patch_shape_y - self.overlap_pix
+        )
+        self.num_patches_x, remainder_x = divmod(
+            self.img_shape_x - self.overlap_pix, self.patch_shape_x - self.overlap_pix
+        )
+        assert remainder_x == 0 and remainder_y == 0
+
+        # Initialize cache for overlap count
+        self.overlap_count = None
+
+    def unfold(self, x):
+        # Cast to float
+        dtype = x.dtype
+        if dtype == torch.int32:
+            x = x.view(torch.float32)
+        elif dtype == torch.int64:
+            x = x.view(torch.float64)
+
+        x = torch.nn.functional.unfold(
+            input=x,
+            kernel_size=(self.patch_shape_y, self.patch_shape_x),
+            stride=(
+                self.patch_shape_y - self.overlap_pix,
+                self.patch_shape_x - self.overlap_pix,
+            ),
+        )
+
+        # cast back
+        if dtype in [torch.int32, torch.int64]:
+            x = x.view(dtype)
+
+        return x
+
+    def fold(self, x):
+        # Cast to float
+        dtype = x.dtype
+        if dtype == torch.int32:
+            x = x.view(torch.float32)
+        elif dtype == torch.int64:
+            x = x.view(torch.float64)
+
+        x = torch.nn.functional.fold(
+            input=x,
+            output_size=(self.img_shape_y, self.img_shape_x),
+            kernel_size=(self.patch_shape_y, self.patch_shape_x),
+            stride=(
+                self.patch_shape_y - self.overlap_pix,
+                self.patch_shape_x - self.overlap_pix,
+            ),
+        )
+
+        # cast back
+        if dtype in [torch.int32, torch.int64]:
+            x = x.view(dtype)
+
+        return x
+
+    def apply(self, input, additional_input=None):
+        unfold = self.unfold(input)
+        unfold = einops.rearrange(
+            unfold,
+            "b (c p_h p_w) (nb_p_h nb_p_w) -> (nb_p_w nb_p_h b) c p_h p_w",
+            p_h=self.patch_shape_y,
+            p_w=self.patch_shape_x,
+            nb_p_h=self.num_patches_y,
+            nb_p_w=self.num_patches_x,
+        )
+        if additional_input is not None:
+            additional_input = torch.nn.functional.interpolate(
+                input=additional_input, size=self.patch_shape, mode="bilinear"
+            )
+            num_super_patches, rem = divmod(input.shape[0], additional_input.shape[0])
+            assert (
+                rem == 0
+            ), f"{additional_input.shape[0]} must be a factor of {input.shape[0]}"
+            repeats = self.num_patches_y * self.num_patches_x * num_super_patches
+            # repeat each patch in the batch patch_num times
+            # TODO(jberner): (1) check that this is equal to interleave and rearrange (2) this assumes a specific patching on input
+            additional_input = additional_input.repeat(repeats, 1, 1, 1)
+            unfold = torch.cat((unfold, additional_input), dim=1)
+
+        return unfold
+
+    def get_overlap_count(self, device, dtype):
+        # compute overlap count
+        ones = torch.ones(
+            (1, 1, self.img_shape_y, self.img_shape_x), device=device, dtype=dtype
+        )
+        overlap_count = self.unfold(ones)
+        return self.fold(overlap_count)
+
+    def fuse(self, input, batch_size=None, window=None):
+        if window is not None:
+            if window.shape[0] == 1:
+                window = window.tile((input.shape[0], input.shape[1], 1, 1))
+
+            x = einops.rearrange(
+                input * window,
+                "(nb_p_w nb_p_h b) c p_h p_w -> b (c p_h p_w) (nb_p_h nb_p_w)",
+                p_h=self.patch_shape_y,
+                p_w=self.patch_shape_x,
+                nb_p_h=self.num_patches_y,
+                nb_p_w=self.num_patches_x,
+            )
+            weights = einops.rearrange(
+                window,
+                "(nb_p_w nb_p_h b) c p_h p_w -> b (c p_h p_w) (nb_p_h nb_p_w)",
+                p_h=self.patch_shape_y,
+                p_w=self.patch_shape_x,
+                nb_p_h=self.num_patches_y,
+                nb_p_w=self.num_patches_x,
+            )
+
+            # Stitch patches together (by summing over overlapping patches)
+            folded = self.fold(x)
+            weights = self.fold(weights)
+            return folded / weights
+        else:
+            # Reshape input to make it 3D to apply fold
+            x = einops.rearrange(
+                input,
+                "(nb_p_w nb_p_h b) c p_h p_w -> b (c p_h p_w) (nb_p_h nb_p_w)",
+                p_h=self.patch_shape_y,
+                p_w=self.patch_shape_x,
+                nb_p_h=self.num_patches_y,
+                nb_p_w=self.num_patches_x,
+            )
+            # Stitch patches together (by summing over overlapping patches)
+            folded = self.fold(x)
+
+            if self.overlap_count is None:
+                self.overlap_count = self.get_overlap_count(
+                    device=folded.device, dtype=folded.dtype
+                )
+            if not (
+                self.overlap_count.dtype == folded.dtype
+                and self.overlap_count.device == folded.device
+            ):
+                self.overlap_count = self.overlap_count.to(folded)
+
+            # Normalize by overlap count
+            return folded / self.overlap_count

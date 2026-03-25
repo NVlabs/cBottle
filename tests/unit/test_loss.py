@@ -15,6 +15,7 @@
 from cbottle.models import networks
 import cbottle.loss
 import torch
+from cbottle._distill_helper import DistillLoss
 
 
 def test_edm_loss_with_classifier():
@@ -49,3 +50,27 @@ def test_edm_loss_without_classifier():
     loss = loss_fn(mock_model, x)
     assert loss.classification is None
     assert loss.total.sum() > 0
+
+
+def test_distill_loss():
+    img_clean = torch.zeros(1, 4, 8, 8)
+    img_lr = torch.zeros(1, 4, 4, 4)
+    pos_embed = torch.zeros(1, 4, 8, 8)
+
+    def mock_net_single_train_step(data, iteration):
+        loss_map = {"total_loss": torch.tensor(1.0)}
+        output = {"pred": torch.zeros_like(data["real"])}
+        return loss_map, output
+
+    class MockNet:
+        def __init__(self):
+            self.single_train_step = mock_net_single_train_step
+
+    loss_fn = DistillLoss(net=MockNet())
+    total_loss, loss_map, output = loss_fn(
+        net=MockNet(),
+        img_clean=img_clean,
+        img_lr=img_lr,
+        pos_embed=pos_embed,
+    )
+    assert total_loss.sum() > 0
