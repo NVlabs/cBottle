@@ -18,6 +18,7 @@ import torch
 
 from cbottle.training.super_resolution import BatchedPatchIterator, Mockdataset
 from cbottle import healpix_utils
+from cbottle.patchify import SuperPatching2D
 
 
 class _InnerModel(torch.nn.Module):
@@ -159,3 +160,13 @@ def test_batched_patch_iterator():
         assert torch.allclose(ltarget, ltarget_ref)
         assert torch.allclose(llr, llr_ref)
         assert torch.allclose(lpe, lpe_ref)
+
+
+def test_super_patching_2d():
+    patcher = SuperPatching2D(
+        img_shape=(128, 128), patch_shape=(64, 64), overlap_pix=32
+    )
+    x = torch.randn(1, 3, 128, 128)
+    patches = patcher.apply(x)
+    reconstructed = patcher.fuse(patches)
+    assert torch.allclose(x, reconstructed)
