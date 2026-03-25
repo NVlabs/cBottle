@@ -31,7 +31,11 @@ dependencies = [
     "xarray>=2025.3.1",
     "zarr>=3.0.7",
     "zict>=3.0.0",
+    "fastgen @ git+https://github.com/NVlabs/FastGen.git",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [build-system]
 requires = ["hatchling"]
