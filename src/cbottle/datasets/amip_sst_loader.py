@@ -102,7 +102,8 @@ class AmipSSTLoader:
     units = "Kelvin"
     path = config.AMIP_MID_MONTH_SST
 
-    def __init__(self, target_grid=None):
+    def __init__(self, target_grid=None, sst_offset: float = 0.0):
+        self.sst_offset = sst_offset
         self.ensure_downloaded()
 
         self.ds = xarray.open_dataset(
@@ -140,7 +141,10 @@ class AmipSSTLoader:
 
     async def sel_time(self, times):
         data = self.interp(times)
-        return {("tosbcs", -1): self.regrid(data)}
+        regridded = self.regrid(data)
+        if self.sst_offset != 0.0:
+            regridded = regridded + self.sst_offset
+        return {("tosbcs", -1): regridded}
 
     def interp(self, time: datetime.datetime):
         """Linearly interpolate between the available points"""
@@ -168,7 +172,8 @@ class AImip_SSTLoader(AmipSSTLoader):
         if _is_file(cls.path):
             _download_aimip_sst(Path(cls.path))
 
-    def __init__(self, target_grid=None):
+    def __init__(self, target_grid=None, sst_offset: float = 0.0):
+        self.sst_offset = sst_offset
         self.ensure_downloaded()
 
         self.ds = xarray.open_dataset(

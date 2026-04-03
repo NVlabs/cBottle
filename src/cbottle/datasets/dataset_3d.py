@@ -486,6 +486,7 @@ def _get_loaders(
     sst_input: bool = True,
     ibtracs_input: bool = False,
     variable_config: VariableConfig = _default_config,
+    sst_offset: float = 0.0,
 ):
     """Get the appropriate loaders for a given dataset.
 
@@ -494,6 +495,7 @@ def _get_loaders(
         sst_input: Whether to include SST input
         ibtracs_input: Whether to include IBTrACS input
         variable_config: Variable configuration for the dataset
+        sst_offset: Uniform SST offset in Kelvin
 
     Returns:
         List of loaders for the specified dataset
@@ -568,12 +570,13 @@ def _get_loaders(
                 HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
             )
             if variable_config == VARIABLE_CONFIGS["aimip"]:
-                loaders.append(AImip_SSTLoader(grid))
+                loaders.append(AImip_SSTLoader(grid, sst_offset=sst_offset))
                 print("used aimip sst data")
             else:
                 loaders.append(
                     AmipSSTLoader(
                         grid,
+                        sst_offset=sst_offset,
                     )
                 )
         if ibtracs_input:
@@ -587,11 +590,12 @@ def _get_loaders(
             HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
         )
         if variable_config == VARIABLE_CONFIGS["aimip"]:
-            loaders = [AImip_SSTLoader(grid)]
+            loaders = [AImip_SSTLoader(grid, sst_offset=sst_offset)]
         else:
             loaders = [
                 AmipSSTLoader(
                     grid,
+                    sst_offset=sst_offset,
                 )
             ]
 
@@ -700,6 +704,7 @@ def get_dataset(
     frame_masker: Optional[FrameMasker] = None,
     variable_config: VariableConfig = _default_config,
     map_style: bool = False,
+    sst_offset: float = 0.0,
 ) -> TimeMergedDataset | TimeMergedMapStyle:
     # Get the appropriate loaders for the dataset
     loaders = _get_loaders(
@@ -707,6 +712,7 @@ def get_dataset(
         sst_input=sst_input,
         ibtracs_input=ibtracs_input,
         variable_config=variable_config,
+        sst_offset=sst_offset,
     )
     times = _get_splits(dataset)[split]
     if times.size == 0:
