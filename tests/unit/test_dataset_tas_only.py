@@ -20,6 +20,7 @@ import torch
 
 from cbottle.datasets import dataset_3d
 
+
 def test_get_loaders_tas_only_with_sst(monkeypatch):
     calls = {"tas": None, "sst_offset": None}
 
@@ -37,7 +38,9 @@ def test_get_loaders_tas_only_with_sst(monkeypatch):
 
     monkeypatch.setattr(dataset_3d, "NetCDFTasLoader", DummyNetCDFTasLoader)
     monkeypatch.setattr(dataset_3d, "AmipSSTLoader", DummyAmipSSTLoader)
-    monkeypatch.setattr(dataset_3d.earth2grid.healpix, "Grid", lambda *args, **kwargs: DummyGrid())
+    monkeypatch.setattr(
+        dataset_3d.earth2grid.healpix, "Grid", lambda *args, **kwargs: DummyGrid()
+    )
 
     loaders = dataset_3d._get_loaders(
         "tas_only",
