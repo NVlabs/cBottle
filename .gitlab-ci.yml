@@ -94,8 +94,9 @@ test:
     - python -m pip install mypy==1.9.0
     - PIP_CONSTRAINT="" make install-linters
     - make lint
-    - python3 -m pip install earth2studio==0.8.1 pytest-regtest
-    - pip install -e .
+    # TODO: training and inference tests should be split into different envs
+    - python3 -m pip install earth2studio==0.13.0 pytest-regtest
+    - pip install -e .[training,visualization]
     - make pytest
     - pytest tests/integration -k 'not train_uncond'
     # TODO fix the scripts tests

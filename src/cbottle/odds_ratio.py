@@ -359,8 +359,8 @@ def calculate_divergence_integral(
 
     try:
         if phase == "backward":
-            return np.trapz(divergence, sigma)
-        return -np.trapz(divergence, sigma)
+            return np.trapezoid(divergence, sigma)
+        return -np.trapezoid(divergence, sigma)
     except Exception as e:  # pragma: no cover - defensive
         logger.warning(f"Error integrating {divergence_key}: {e}")
         return 0.0
