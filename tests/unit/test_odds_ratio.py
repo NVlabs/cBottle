@@ -104,6 +104,10 @@ def test_calculate_odds_ratio_full_forward_only():
 
     assert math.isfinite(result.forward_score_div_integral)
     assert result.forward_latents.shape == batch["target"].shape
+    assert result.forward_divergence_data
+    assert {"sigma", "divergence", "score_divergence"} <= set(
+        result.forward_divergence_data[0]
+    )
     assert result.backward_gaussian_logp is None
     with pytest.raises(ValueError):
         _ = result.log_odds_ratio
@@ -132,6 +136,10 @@ def test_calculate_odds_ratio_full_three_phases():
     assert math.isfinite(result.forward_score_div_integral)
     assert math.isfinite(result.log_odds_ratio)
     assert isinstance(result.backward_latents, torch.Tensor)
+    assert result.backward_divergence_data
+    assert {"sigma", "divergence", "score_divergence"} <= set(
+        result.backward_divergence_data[0]
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -162,6 +170,32 @@ def test_calculate_odds_ratio_simple_wrapper():
         model.calculate_odds_ratio(
             batch, guidance_pixels, num_steps=2, run_backward=False
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_calculate_odds_ratio_full_start_latents_skips_forward():
+    """start_latents skips decode and still produces a finite log-odds ratio."""
+    classifier = MockClassifier()
+    model = _make_tiny_cbottle3d(classifier)
+    batch = _make_batch()
+    guidance_pixels = torch.tensor([0]).cuda()
+    x0 = torch.randn_like(batch["target"])
+
+    result = model._calculate_odds_ratio_full(
+        batch,
+        guidance_pixels,
+        num_steps=2,
+        extra_steps_intervals=(),
+        divergence_samples=1,
+        guidance_on=0.0,
+        guidance_off=float("inf"),
+        run_backward=True,
+        bf16=False,
+        start_latents=x0,
+    )
+    assert torch.equal(result.forward_latents, x0)
+    assert math.isnan(result.forward_score_div_integral)
+    assert math.isfinite(result.log_odds_ratio)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
