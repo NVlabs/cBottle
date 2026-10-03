@@ -54,10 +54,12 @@ __all__ = [
 class OddsRatioResult:
     """Return type of :meth:`CBottle3d.calculate_odds_ratio`.
 
-    Forward-phase fields are always populated. Backward-phase fields are
-    ``None`` when ``run_backward=False``. The :attr:`log_odds_ratio` property
-    combines the backward fields into ``log p_unguided / p_guided`` at the
-    target sample.
+    Forward-phase fields are populated unless the forward phase was skipped
+    via ``start_latents`` (then the integrals are NaN). Backward-phase fields
+    are ``None`` when ``run_backward=False``. The :attr:`log_odds_ratio`
+    property combines the backward fields into ``log p_unguided / p_guided``
+    at the target sample. ``*_divergence_data`` hold the per-step
+    :class:`DivergenceTracker` records (sigma, divergence, score_divergence).
     """
 
     # Forward phase
@@ -65,12 +67,14 @@ class OddsRatioResult:
     forward_score_div_integral: float
     forward_latents: torch.Tensor
     initial_log_prob: float | None
+    forward_divergence_data: list[dict] | None = None
 
     # Backward-with-guidance phase
     backward_guidance_div_integral: float | None = None
     backward_score_div_integral: float | None = None
     backward_gaussian_logp: float | None = None
     backward_latents: torch.Tensor | None = None
+    backward_divergence_data: list[dict] | None = None
 
     # Backward-without-guidance phase
     backward_no_guidance_guidance_div_integral: float | None = None

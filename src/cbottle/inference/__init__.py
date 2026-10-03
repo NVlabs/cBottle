@@ -807,6 +807,7 @@ class CBottle3d:
         forward_guidance: bool = True,
         compute_forward_divergences: bool = True,
         seed: int | None = None,
+        start_latents: torch.Tensor | None = None,
     ) -> OddsRatioResult:
         """Compute log-odds-ratio ingredients for ``batch`` under classifier guidance.
 
@@ -862,6 +863,11 @@ class CBottle3d:
             seed: If set, seeds the initial Gaussian noise for the forward
                 phase so the method is deterministic run-to-run. Hutchinson probes
                 are always deterministically seeded per step.
+            start_latents: If set, skip the forward phase and run the two
+                backward phases on this state instead (e.g. a previously saved
+                sample). Must match ``batch["target"]`` in shape and be in the
+                model's normalized pixel order. The forward fields of the
+                result are then NaN / ``None``.
 
         Returns:
             :class:`~cbottle.odds_ratio.OddsRatioResult` with per-phase
@@ -953,27 +959,44 @@ class CBottle3d:
             return raw, tracker
 
         # ---- Forward ---------------------------------------------------------
-        forward_phase = "forward" if forward_guidance else "forward_no_guidance"
-        forward_latents, forward_tracker = _run_phase(
-            reverse=False,
-            compute_guidance=forward_guidance,
-            start_latents=None,
-            phase=forward_phase,
-            compute_divergences=compute_forward_divergences,
-        )
-        forward_guidance_div_integral = calculate_divergence_integral(
-            forward_tracker.data, "divergence", "forward"
-        )
-        forward_score_div_integral = calculate_divergence_integral(
-            forward_tracker.data, "score_divergence", "forward"
-        )
+        if start_latents is not None:
+            if start_latents.shape != batch["target"].shape:
+                raise ValueError(
+                    f"start_latents shape {tuple(start_latents.shape)} != "
+                    f"batch['target'] shape {tuple(batch['target'].shape)}"
+                )
+            forward_latents = start_latents.to(
+                device=self.device, dtype=batch["target"].dtype
+            )
+            result = OddsRatioResult(
+                forward_guidance_div_integral=float("nan"),
+                forward_score_div_integral=float("nan"),
+                initial_log_prob=None,
+                forward_latents=forward_latents,
+            )
+        else:
+            forward_phase = "forward" if forward_guidance else "forward_no_guidance"
+            forward_latents, forward_tracker = _run_phase(
+                reverse=False,
+                compute_guidance=forward_guidance,
+                start_latents=None,
+                phase=forward_phase,
+                compute_divergences=compute_forward_divergences,
+            )
+            forward_guidance_div_integral = calculate_divergence_integral(
+                forward_tracker.data, "divergence", "forward"
+            )
+            forward_score_div_integral = calculate_divergence_integral(
+                forward_tracker.data, "score_divergence", "forward"
+            )
 
-        result = OddsRatioResult(
-            forward_guidance_div_integral=float(forward_guidance_div_integral),
-            forward_score_div_integral=float(forward_score_div_integral),
-            initial_log_prob=forward_tracker.initial_log_prob,
-            forward_latents=forward_latents,
-        )
+            result = OddsRatioResult(
+                forward_guidance_div_integral=float(forward_guidance_div_integral),
+                forward_score_div_integral=float(forward_score_div_integral),
+                initial_log_prob=forward_tracker.initial_log_prob,
+                forward_latents=forward_latents,
+                forward_divergence_data=list(forward_tracker.data),
+            )
 
         if not run_backward:
             return result
@@ -1019,6 +1042,7 @@ class CBottle3d:
         result.backward_score_div_integral = float(backward_score_div_integral)
         result.backward_gaussian_logp = float(backward_gaussian_logp)
         result.backward_latents = backward_latents
+        result.backward_divergence_data = list(backward_tracker.data)
         result.backward_no_guidance_guidance_div_integral = float(
             backward_no_guidance_guidance_div_integral
         )
