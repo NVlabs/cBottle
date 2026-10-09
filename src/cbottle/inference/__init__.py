@@ -528,6 +528,7 @@ class CBottle3d:
         guidance_pixels: torch.Tensor | None = None,
         guidance_scale: float = 0.03,
         bf16=True,
+        spatial_mask: torch.Tensor | None = None,
         return_untransformed: bool = False,
     ):
         """
@@ -547,6 +548,7 @@ class CBottle3d:
             guidance_pixels=guidance_pixels,
             guidance_scale=guidance_scale,
             bf16=bf16,
+            spatial_mask=spatial_mask,
             pre_generated_latents=None,
             return_untransformed=return_untransformed,
         )
@@ -559,6 +561,7 @@ class CBottle3d:
         guidance_pixels: torch.Tensor | None = None,
         guidance_scale: float = 0.03,
         bf16=True,
+        spatial_mask: torch.Tensor | None = None,
         pre_generated_latents: torch.Tensor | None = None,
         return_untransformed: bool = False,
         guidance_fn: Callable[
@@ -608,6 +611,9 @@ class CBottle3d:
             label_ind
         ]  # n, c
         mask = mask[:, :, None, None]
+        spatial_mask_gpu = (
+            spatial_mask.to(self.device) if spatial_mask is not None else None
+        )
 
         with torch.no_grad():
             device = condition.device
@@ -679,8 +685,11 @@ class CBottle3d:
                 if _call_guidance:
                     x_hat.requires_grad_(True)
 
+                x_in = x_hat.where(mask, 0)
+                if spatial_mask_gpu is not None:
+                    x_in = x_in * spatial_mask_gpu
                 out = self.net(
-                    x_hat.where(mask, 0),
+                    x_in,
                     t_hat,
                     class_labels=labels,
                     condition=condition,
@@ -700,6 +709,8 @@ class CBottle3d:
                 else:
                     d2 = 0.0
                 d = out.out.where(mask, d2)
+                if spatial_mask_gpu is not None:
+                    d = d * spatial_mask_gpu
                 if _call_guidance:
                     # Logits are only required when we'll be calling the default
                     # classifier get_guidance (which needs them). Custom

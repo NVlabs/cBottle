@@ -76,3 +76,16 @@ CHECKPOINT_ROOT = os.getenv(
 IBTRACS_DATA_PATH = os.getenv(
     "IBTRACS_DATA_PATH", os.path.join(CACHE_DIR, "ibtracs.nc")
 )
+
+RCLONE_CONFIG = os.getenv("RCLONE_CONFIG", "")
+
+# Job submission
+SUBMIT_ACCOUNT = os.getenv("SUBMIT_ACCOUNT", "")
+SUBMIT_SCRIPT = os.getenv("SUBMIT_SCRIPT", "")
+
+# tas-only netCDF training data
+TAS_ONLY_NETCDF_DIR = os.getenv(
+    "TAS_ONLY_NETCDF_DIR",
+    "/lustre/fs1/portfolios/coreai/projects/coreai_climate_earth2/"
+    "tge/climate_bottle/inferences/v6data-mChan192/MoE",
+)

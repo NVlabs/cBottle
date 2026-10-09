@@ -21,7 +21,9 @@ import sys
 
 import fsspec
 
-DEFAULT_PATH = os.path.expanduser("~/.config/rclone/rclone.conf")
+DEFAULT_PATH = os.getenv(
+    "RCLONE_CONFIG", os.path.expanduser("~/.config/rclone/rclone.conf")
+)
 
 
 class StorageConfigError(Exception):

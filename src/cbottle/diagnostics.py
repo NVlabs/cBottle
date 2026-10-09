@@ -166,6 +166,7 @@ def sample_from_condition(
         batch.pop("target")
         labels = batch.pop("labels")
         batch.pop("mask", None)
+        batch.pop("spatial_mask", None)
 
         if regression:
             out = call_regression(
