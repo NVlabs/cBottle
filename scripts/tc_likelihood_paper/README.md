@@ -21,8 +21,9 @@ can be rerun on GPUs with the public EMA checkpoints.
 
 ## Redrawing the figures from the archived outputs
 
-The archive (Zenodo, DOI to be added) has the layout of a `run_gpu.sh` output
-directory, about 5 MB. With cBottle installed:
+The archive on [Zenodo](https://doi.org/10.5281/zenodo.24089312) unpacks to
+`tc_likelihood_paper_data/`, about 5 MB in the layout of a `run_gpu.sh` output
+directory. With cBottle installed:
 
 ```bash
 OUT=/path/to/tc_likelihood_paper_data ./make_figures.sh
