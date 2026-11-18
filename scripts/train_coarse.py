@@ -51,6 +51,7 @@ from cbottle.datasets.dataset_3d import (
     MAX_CLASSES,
     get_batch_info,
     get_dataset,
+    _build_spatial_mask,
 )
 from cbottle.diagnostics import (
     sample_from_condition,
@@ -105,6 +106,8 @@ class TrainingLoop(loop.TrainingLoopBase):
     icon_chunk_size: int = 8
     era5_chunk_size: int = 48
     aimip_train_test_split: bool = False
+    tas_only_bbox: str = ""
+    tas_only_mask_path: str = ""
 
     # network
     network: SongUnetConfig = SongUnetConfig()
@@ -241,8 +244,36 @@ class TrainingLoop(loop.TrainingLoopBase):
                 # use a fixed unconditional generation task for test set
                 return FrameMasker(keep_frames=[])
 
+    def _get_spatial_mask(self):
+        bbox = None
+        if self.tas_only_bbox:
+            parts = [float(x) for x in self.tas_only_bbox.split(",")]
+            bbox = (parts[0], parts[1], parts[2], parts[3])
+        mask_path = self.tas_only_mask_path or None
+        return _build_spatial_mask(bbox=bbox, mask_path=mask_path)
+
     def get_dataset(self, train: bool):
         """Returns the final wrapped dataset for both image and video training."""
+        if self.variables == "tas_only":
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+            spatial_mask = self._get_spatial_mask()
+            return get_dataset(
+                split="train" if train else "test",
+                dataset="tas_only",
+                rank=rank,
+                world_size=world_size,
+                sst_input=self.monthly_sst_input,
+                infinite=True,
+                shuffle=True,
+                chunk_size=self.era5_chunk_size,
+                time_step=self.time_step,
+                time_length=self.time_length,
+                frame_masker=self._get_frame_masker(train),
+                variable_config=VARIABLE_CONFIGS["tas_only"],
+                spatial_mask=spatial_mask,
+            )
+
         if self.with_era5 and dist.get_world_size() % 2 != 0:
             warnings.warn(
                 RuntimeWarning(
@@ -346,16 +377,24 @@ class TrainingLoop(loop.TrainingLoopBase):
         return D
 
     def _curry_net_discard_classifier(self, net, batch):
+        spatial_mask = batch.get("spatial_mask")
+        if spatial_mask is not None:
+            sm = spatial_mask[0] if spatial_mask.dim() > 1 else spatial_mask
+
         def D(x, t):
+            x_in = x * sm if spatial_mask is not None else x
             out = net(
-                x.to(memory_format=self.memory_format),
+                x_in.to(memory_format=self.memory_format),
                 torch.as_tensor(t, device=x.device),
                 batch["labels"],
                 condition=batch["condition"],
                 day_of_year=batch["day_of_year"],
                 second_of_day=batch["second_of_day"],
             )
-            return out.out
+            result = out.out
+            if spatial_mask is not None:
+                result = result * sm
+            return result
 
         return D
 
@@ -364,6 +403,7 @@ class TrainingLoop(loop.TrainingLoopBase):
             self._curry_net(self.ddp, batch),
             target,
             classifier_labels=batch.get("classifier_labels"),
+            spatial_mask=batch.get("spatial_mask"),
         )
         training_stats.report("Loss/denoising", loss.denoising)
         self._train_sigma_metric.update(loss.sigma, loss.denoising)
@@ -377,6 +417,7 @@ class TrainingLoop(loop.TrainingLoopBase):
             self._curry_net(self.ddp, batch),
             target,
             classifier_labels=batch.get("classifier_labels"),
+            spatial_mask=batch.get("spatial_mask"),
         )
         training_stats.report("Loss/test_denoising", loss.denoising)
         self._test_sigma_metric.update(loss.sigma, loss.denoising)
@@ -472,6 +513,10 @@ class TrainingLoop(loop.TrainingLoopBase):
         with self._disable_parameter_gradients(net):
             target = batch["target"]
             mask = ~torch.isnan(target)
+            spatial_mask = batch.get("spatial_mask")
+            if spatial_mask is not None:
+                sm = spatial_mask[0] if spatial_mask.dim() > 1 else spatial_mask
+                mask = mask & (sm != 0)
             log_prob, _ = cbottle.likelihood.log_prob(
                 # TODO replace with denoiser classifier?
                 self._curry_net_discard_classifier(net, batch),

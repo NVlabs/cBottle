@@ -51,6 +51,7 @@ import cftime
 import earth2grid
 import numpy as np
 import pandas as pd
+import xarray as xr
 import torch
 from cbottle.datasets import catalog
 from cbottle.datasets.base import BatchInfo, TimeUnit
@@ -64,7 +65,9 @@ from cbottle.datasets.dataset_2d import (
 from cbottle.datasets.ibtracs import IBTracs
 from cbottle.datasets.amip_sst_loader import AmipSSTLoader, AImip_SSTLoader
 from cbottle.datasets.merged_dataset import TimeMergedDataset, TimeMergedMapStyle
+from cbottle.datasets.netcdf_tas_loader import NetCDFTasLoader
 from cbottle.datasets.zarr_loader import ZarrLoader
+from cbottle.config import environment as config
 from cbottle.training.video.frame_masker import FrameMasker
 
 NO_LEVEL = -1
@@ -141,6 +144,11 @@ VARIABLE_CONFIGS["aimip"] = VariableConfig(
         "2d",
     ],
 )
+VARIABLE_CONFIGS["tas_only"] = VariableConfig(
+    levels=[],
+    variables_3d=[],
+    variables_2d=["tas"],
+)
 _default_config = VARIABLE_CONFIGS["default"]
 
 
@@ -183,6 +191,13 @@ DATASET_METADATA: dict[str, DatasetMetadata] = {
         name="amip",
         start="1940-01-01",
         end="2021-12-31",
+        time_step=1,
+        time_unit=TimeUnit.HOUR,
+    ),
+    "tas_only": DatasetMetadata(
+        name="tas_only",
+        start="1940-01-01",
+        end="2020-12-31",
         time_step=1,
         time_unit=TimeUnit.HOUR,
     ),
@@ -474,6 +489,83 @@ def _encode_amip(
     return out
 
 
+def _build_spatial_mask(
+    bbox: tuple[float, float, float, float] | None = None,
+    mask_path: str | None = None,
+) -> torch.Tensor:
+    """Build a spatial mask in HEALPIX_PAD_XY order."""
+    grid = earth2grid.healpix.Grid(
+        HPX_LEVEL, pixel_order=earth2grid.healpix.HEALPIX_PAD_XY
+    )
+    lat = torch.tensor(grid.lat)
+    lon = torch.tensor(grid.lon)
+
+    if mask_path is not None:
+        ds = xr.open_dataset(mask_path)
+        mask_var = [v for v in ds.data_vars if ds[v].dims == ("pix",)]
+        if not mask_var:
+            raise ValueError(f"No 1D pix variable found in {mask_path}")
+        mask_ring = torch.tensor(ds[mask_var[0]].values, dtype=torch.float32)
+        ds.close()
+        ring_grid = earth2grid.healpix.Grid(
+            HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.RING
+        )
+        mask = ring_grid.reorder(earth2grid.healpix.HEALPIX_PAD_XY, mask_ring)
+    elif bbox is not None:
+        lat_min, lat_max, lon_min, lon_max = bbox
+        mask = (
+            (lat >= lat_min) & (lat <= lat_max) & (lon >= lon_min) & (lon <= lon_max)
+        ).float()
+    else:
+        mask = torch.ones(len(lat), dtype=torch.float32)
+
+    return mask
+
+
+def _encode_netcdf_tas(
+    time: cftime.DatetimeGregorian,
+    data: dict[tuple[str, int | None], np.ndarray],
+    *,
+    label: int,
+    mean: np.ndarray,
+    scale: np.ndarray,
+    variable_config: VariableConfig,
+    spatial_mask: torch.Tensor,
+):
+    """Encode a single tas frame from netCDF data with SST condition and mask."""
+    labels = torch.nn.functional.one_hot(torch.tensor(label), num_classes=MAX_CLASSES)
+    mean = mean[:, np.newaxis, np.newaxis]
+    scale = scale[:, np.newaxis, np.newaxis]
+    arr = _collect_fields(_get_index(variable_config), data)
+    arr = (arr - mean) / scale
+
+    def reorder(x):
+        x = torch.as_tensor(x)
+        return earth2grid.healpix.reorder(
+            x, earth2grid.healpix.PixelOrder.NEST, earth2grid.healpix.HEALPIX_PAD_XY
+        ).to(torch.float32)
+
+    target = reorder(arr) * spatial_mask
+    sst = data[("tosbcs", NO_LEVEL)]
+    cond = reorder(encode_sst(sst))
+
+    day_start = time.replace(hour=0, minute=0, second=0)
+    year_start = day_start.replace(month=1, day=1)
+    second_of_day = (time - day_start) / datetime.timedelta(seconds=1)
+    day_of_year = (time - year_start) / datetime.timedelta(seconds=86400)
+
+    out = {
+        "target": target,
+        "labels": labels,
+        "condition": cond,
+        "second_of_day": torch.tensor([second_of_day]),
+        "day_of_year": torch.tensor([day_of_year]),
+        "spatial_mask": spatial_mask,
+    }
+    out["timestamp"] = _cftime_to_timestamp(time)
+    return out
+
+
 def _loader_from_catalog(dataset: catalog._Zarr, **kwargs) -> ZarrLoader:
     return ZarrLoader(
         path=dataset.path, storage_options=dataset.storage_options, **kwargs
@@ -598,6 +690,15 @@ def _get_loaders(
                     sst_offset=sst_offset,
                 )
             ]
+    elif dataset == "tas_only":
+        loaders = [
+            NetCDFTasLoader(directory=config.TAS_ONLY_NETCDF_DIR),
+        ]
+        if sst_input:
+            grid = earth2grid.healpix.Grid(
+                HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
+            )
+            loaders.append(AmipSSTLoader(grid, sst_offset=sst_offset))
 
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
@@ -610,6 +711,7 @@ def _get_frame_encoder(
     *,
     sst_input: bool = True,
     variable_config: VariableConfig = _default_config,
+    spatial_mask: torch.Tensor | None = None,
 ):
     """Get the appropriate transform function for a given dataset.
 
@@ -656,6 +758,17 @@ def _get_frame_encoder(
         encode_frame = functools.partial(
             _encode_amip, label=LABELS.index("era5"), variable_config=variable_config
         )
+    elif dataset == "tas_only":
+        if spatial_mask is None:
+            spatial_mask = _build_spatial_mask()
+        encode_frame = functools.partial(
+            _encode_netcdf_tas,
+            label=LABELS.index("era5"),
+            mean=get_mean(variable_config),
+            scale=get_std(variable_config),
+            variable_config=variable_config,
+            spatial_mask=spatial_mask,
+        )
 
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
@@ -682,6 +795,9 @@ def _get_splits(dataset: str):
         # AMIP doesn't have train/test split, use all times
         train_times = valid_times
         test_times = valid_times
+    elif dataset == "tas_only":
+        train_times = valid_times[valid_times < "2015"]
+        test_times = valid_times[valid_times >= "2015"]
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
 
@@ -704,6 +820,7 @@ def get_dataset(
     frame_masker: Optional[FrameMasker] = None,
     variable_config: VariableConfig = _default_config,
     map_style: bool = False,
+    spatial_mask: torch.Tensor | None = None,
     sst_offset: float = 0.0,
 ) -> TimeMergedDataset | TimeMergedMapStyle:
     # Get the appropriate loaders for the dataset
@@ -737,6 +854,7 @@ def get_dataset(
             dataset,
             sst_input=sst_input,
             variable_config=variable_config,
+            spatial_mask=spatial_mask,
         ),
         frame_masker=frame_masker,
     )

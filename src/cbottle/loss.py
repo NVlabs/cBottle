@@ -107,6 +107,7 @@ class EDMLoss:
         net: Callable[..., cbottle.models.networks.Output],
         images,
         classifier_labels=None,
+        spatial_mask=None,
     ) -> Output:
         if self.distribution == "log_normal":
             sigma = self._sample_sigma_like_v1(images)
@@ -119,6 +120,9 @@ class EDMLoss:
 
         _, _, _t, _x = range(4)
         mask = ~torch.isnan(images).any(dim=(_t, _x), keepdim=True)
+        if spatial_mask is not None:
+            sm = spatial_mask[0] if spatial_mask.dim() > 1 else spatial_mask
+            mask = mask & (sm != 0)
         weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
         y = images
         n = torch.randn_like(y) * sigma
