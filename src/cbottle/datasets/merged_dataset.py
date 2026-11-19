@@ -133,6 +133,7 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
         self.window_stride = window_stride
 
         self._generator = None
+        self._chunk_generator = None
 
         max_valid_idx = len(times) - self.chunk_size
         self.max_valid_chunk_idx = max_valid_idx // self.chunk_size
@@ -179,6 +180,19 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
             self._generator = np.random.default_rng(seed=(seed % 2**32))
         self._generator.shuffle(arr)
 
+    def _shuffle_chunks(self, chunk_idxs, worker_info=None):
+        # Every data worker must shuffle the chunks in the same order, so that
+        # the split below hands each chunk to exactly one worker. The workers
+        # of one DataLoader share ``seed - id``.
+        if self._chunk_generator is None:
+            if worker_info:
+                seed = worker_info.seed - worker_info.id
+            else:
+                seed = np.random.randint(0, 2**31) + self.rank
+
+            self._chunk_generator = np.random.default_rng(seed=(seed % 2**32))
+        self._chunk_generator.shuffle(chunk_idxs)
+
     def _iter(self):
         num_chunks = math.ceil(len(self._times) / self.chunk_size)
         chunk_idxs = np.arange(num_chunks)
@@ -188,7 +202,7 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
         worker_id = 0 if info is None else info.id
 
         if self.shuffle:
-            self._generator_shuffle(chunk_idxs, info)
+            self._shuffle_chunks(chunk_idxs, info)
 
         # Shard chunks across the data workers
         chunk_idxs = _split(chunk_idxs, worker_id, num_workers, drop_extra=False)
