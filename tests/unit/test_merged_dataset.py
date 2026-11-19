@@ -179,6 +179,32 @@ def test_time_merged_dataset(time_length, frame_step, window_stride):
         ), "Chunks should be in different orders when shuffled"
 
 
+@pytest.mark.parametrize("num_workers", [2, 4])
+def test_time_merged_dataset_shuffle_with_workers(num_workers):
+    # With shuffle=True, one pass over the dataset should still yield every
+    # time exactly once when the chunks are split across data workers.
+    chunk_size = 8
+    num_frames = chunk_size * 16
+    start_date = "2025-01-01"
+    times = pd.date_range(start_date, periods=num_frames, freq="h")
+    loader = MockLoader(num_frames, 1, 1, 1, start_date)
+
+    dataset = TimeMergedDataset(
+        times=times,
+        time_loaders=[loader],
+        transform=temporal_stack,
+        chunk_size=chunk_size,
+        shuffle=True,
+        infinite=False,
+    )
+    dataloader = torch.utils.data.DataLoader(
+        dataset, batch_size=1, num_workers=num_workers
+    )
+
+    indices = [int(sample["target"][0, 0, 0, 0].item()) for sample in dataloader]
+    assert sorted(indices) == list(range(num_frames))
+
+
 @pytest.mark.parametrize(
     "time_length,frame_step",
     [
